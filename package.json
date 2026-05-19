@@ -1,0 +1,12 @@
+{
+  "name": "focus-pattern-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A desktop work time tracker with local focus pattern learning.",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "bash -c 'unset ELECTRON_RUN_AS_NODE; ../codingterminal/node_modules/.bin/electron --no-sandbox --disable-gpu --disable-gpu-compositing .'",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check app.js && node --check focusModel.js",
+    "test": "node --test focusModel.test.cjs"
+  }
+}
