@@ -15,9 +15,11 @@
   var HOUR_MS = 60 * 60 * 1000;
   var MINUTE_MS = 60 * 1000;
   var DEFAULT_SCORE = 55;
-  var DEFAULT_GOAL_MINUTES = 45;
+  var DEFAULT_GOAL_MINUTES = 50;
   var DEFAULT_SHORT_BREAK_MINUTES = 10;
   var DEFAULT_LONG_BREAK_MINUTES = 25;
+  var MIN_FOCUS_BLOCK_MINUTES = 25;
+  var MAX_FOCUS_BLOCK_MINUTES = 90;
 
   var DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -36,6 +38,14 @@
   function round(value, places) {
     var factor = Math.pow(10, places || 0);
     return Math.round(value * factor) / factor;
+  }
+
+  function roundToFive(value) {
+    return Math.round(value / 5) * 5;
+  }
+
+  function ceilToFive(value) {
+    return Math.ceil(value / 5) * 5;
   }
 
   function getSessionStart(session) {
@@ -297,7 +307,7 @@
 
     model.averageFocusScore = Math.round(average(scores, DEFAULT_SCORE));
     model.streakDays = calculateStreakDays(source);
-    model.suggestedGoalMinutes = Math.round(clamp(average(goalMinutes, defaultGoal), 20, 120) / 5) * 5;
+    model.suggestedGoalMinutes = roundToFive(clamp(average(goalMinutes, defaultGoal), MIN_FOCUS_BLOCK_MINUTES, MAX_FOCUS_BLOCK_MINUTES));
     model.suggestedShortBreakMinutes = suggestShortBreakMinutes(model.suggestedGoalMinutes, model.averageFocusScore);
     model.suggestedLongBreakMinutes = Math.round(clamp(model.suggestedShortBreakMinutes * 2.5, 15, 35) / 5) * 5;
     model.breakPolicy = {
@@ -413,19 +423,17 @@
       adjusted += 10;
     }
 
-    return Math.round(clamp(adjusted, 20, 120) / 5) * 5;
+    return roundToFive(clamp(adjusted, MIN_FOCUS_BLOCK_MINUTES, MAX_FOCUS_BLOCK_MINUTES));
   }
 
   function suggestShortBreakMinutes(blockMinutes, focusScore) {
-    var base = blockMinutes <= 30 ? 5 : blockMinutes <= 45 ? 8 : 10;
+    var base = blockMinutes <= 30 ? 5 : blockMinutes <= 55 ? 10 : blockMinutes <= 75 ? 15 : 20;
 
     if (focusScore < 55) {
       base += 5;
-    } else if (focusScore > 78 && blockMinutes <= 60) {
-      base -= 2;
     }
 
-    return Math.round(clamp(base, 5, 20) / 5) * 5;
+    return roundToFive(clamp(base, 5, 20));
   }
 
   function recommendBreakLength(model, recentSessions, settings) {
@@ -440,7 +448,8 @@
     var shortBreak = asNumber(options.shortBreakMinutes, learned.suggestedShortBreakMinutes || DEFAULT_SHORT_BREAK_MINUTES);
     var longBreak = asNumber(options.longBreakMinutes, learned.suggestedLongBreakMinutes || DEFAULT_LONG_BREAK_MINUTES);
     var type = options.forceLongBreak ? "long" : "short";
-    var minutes = type === "long" ? longBreak : suggestShortBreakMinutes(blockMinutes, averageScore);
+    var currentBlockMinutes = asNumber(options.currentBlockMinutes, blockMinutes);
+    var minutes = type === "long" ? longBreak : suggestShortBreakMinutes(currentBlockMinutes, averageScore);
 
     if (type === "short") {
       minutes = Math.round(clamp(average([minutes, shortBreak], shortBreak), 5, 20) / 5) * 5;
@@ -448,7 +457,7 @@
       minutes += 5;
     }
 
-    minutes = Math.round(clamp(minutes, type === "long" ? 15 : 5, type === "long" ? 40 : 20) / 5) * 5;
+    minutes = roundToFive(clamp(minutes, type === "long" ? 15 : 5, type === "long" ? 40 : 20));
 
     return {
       type: type,
@@ -456,7 +465,95 @@
       confidence: round(clamp((learned.sessionCount || 0) / 12, 0.25, 0.95), 2),
       reason: type === "long"
         ? "Long recovery after repeated focus blocks"
-        : "Short recovery tuned from recent focus quality"
+        : "Research-backed recovery for the next focus block"
+    };
+  }
+
+  function recommendDailyPlan(model, recentSessions, settings) {
+    var options = settings || {};
+    var learned = model || createEmptyModel();
+    var recent = Array.isArray(recentSessions) ? recentSessions.slice(-5) : [];
+    var remaining = clamp(asNumber(options.remainingGoalMinutes, options.dailyGoalMinutes || 0), 0, 720);
+    var currentFocus = asNumber(options.currentFocusRating, 4);
+    var currentEnergy = asNumber(options.currentEnergy, 4);
+    var completedBlocks = Math.max(0, asNumber(options.completedBlocksSinceLongBreak, 0));
+    var targetBlock = recommendBlockLength(learned, recent);
+    var blocksRemaining;
+    var nextBlock;
+    var breakPlan;
+    var plannedBreakMinutes = 0;
+    var i;
+
+    if (currentFocus <= 2 || currentEnergy <= 2) {
+      targetBlock = Math.min(targetBlock, 35);
+    } else if (currentFocus >= 4 && currentEnergy >= 4) {
+      targetBlock = Math.max(targetBlock, DEFAULT_GOAL_MINUTES);
+    }
+
+    targetBlock = roundToFive(clamp(targetBlock, MIN_FOCUS_BLOCK_MINUTES, MAX_FOCUS_BLOCK_MINUTES));
+
+    if (remaining <= 0) {
+      return {
+        goalMet: true,
+        blocksRemaining: 0,
+        nextBlockMinutes: 0,
+        nextBreakMinutes: 0,
+        nextBreakType: "none",
+        plannedBreakMinutes: 0,
+        totalActiveMinutes: 0,
+        totalPlanMinutes: 0,
+        reason: "Daily goal met"
+      };
+    }
+
+    if (remaining <= MIN_FOCUS_BLOCK_MINUTES) {
+      blocksRemaining = 1;
+      nextBlock = ceilToFive(remaining);
+    } else {
+      blocksRemaining = Math.max(1, Math.round(remaining / targetBlock));
+      nextBlock = roundToFive(remaining / blocksRemaining);
+
+      if (nextBlock > MAX_FOCUS_BLOCK_MINUTES) {
+        blocksRemaining = Math.ceil(remaining / MAX_FOCUS_BLOCK_MINUTES);
+        nextBlock = roundToFive(remaining / blocksRemaining);
+      }
+
+      if (nextBlock < MIN_FOCUS_BLOCK_MINUTES && blocksRemaining > 1) {
+        blocksRemaining = Math.max(1, Math.floor(remaining / MIN_FOCUS_BLOCK_MINUTES));
+        nextBlock = roundToFive(remaining / blocksRemaining);
+      }
+    }
+
+    nextBlock = Math.min(ceilToFive(remaining), clamp(nextBlock, 5, MAX_FOCUS_BLOCK_MINUTES));
+    breakPlan = recommendBreakLength(learned, recent, {
+      shortBreakMinutes: options.shortBreakMinutes,
+      longBreakMinutes: options.longBreakMinutes,
+      currentBlockMinutes: nextBlock,
+      forceLongBreak: blocksRemaining > 1 && ((completedBlocks + 1) % asNumber(options.blocksBeforeLongBreak, 4) === 0)
+    });
+
+    for (i = 1; i < blocksRemaining; i += 1) {
+      plannedBreakMinutes += ((completedBlocks + i) % asNumber(options.blocksBeforeLongBreak, 4) === 0)
+        ? asNumber(options.longBreakMinutes, DEFAULT_LONG_BREAK_MINUTES)
+        : recommendBreakLength(learned, recent, {
+            shortBreakMinutes: options.shortBreakMinutes,
+            currentBlockMinutes: nextBlock
+          }).minutes;
+    }
+
+    return {
+      goalMet: false,
+      blocksRemaining: blocksRemaining,
+      nextBlockMinutes: nextBlock,
+      nextBreakMinutes: blocksRemaining > 1 ? breakPlan.minutes : 0,
+      nextBreakType: blocksRemaining > 1 ? breakPlan.type : "optional",
+      plannedBreakMinutes: plannedBreakMinutes,
+      totalActiveMinutes: remaining,
+      totalPlanMinutes: remaining + plannedBreakMinutes,
+      confidence: breakPlan.confidence,
+      reason: blocksRemaining > 1
+        ? "Plan keeps breaks inside the remaining daily goal"
+        : "Final block to finish today's goal"
     };
   }
 
@@ -492,6 +589,7 @@
     predictNextFocusWindow: predictNextFocusWindow,
     recommendBlockLength: recommendBlockLength,
     recommendBreakLength: recommendBreakLength,
+    recommendDailyPlan: recommendDailyPlan,
     formatDuration: formatDuration
   };
 });

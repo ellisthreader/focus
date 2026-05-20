@@ -32,7 +32,7 @@ test("empty model returns smoothed UI-ready defaults", () => {
   assert.equal(model.hours.length, 24);
   assert.equal(model.days.length, 7);
   assert.equal(model.averageFocusScore, 55);
-  assert.equal(model.suggestedGoalMinutes, 45);
+  assert.equal(model.suggestedGoalMinutes, 50);
   assert.equal(model.suggestedShortBreakMinutes, 10);
   assert.equal(model.suggestedLongBreakMinutes, 25);
   assert.equal(model.breakPolicy.source, "research-default");
@@ -163,4 +163,33 @@ test("recommendBreakLength returns researched defaults and long recovery", () =>
   assert.ok(shortBreak.minutes <= 20);
   assert.equal(longBreak.type, "long");
   assert.ok(longBreak.minutes >= 25);
+});
+
+test("recommendDailyPlan sizes blocks and breaks from the remaining daily goal", () => {
+  const model = FocusModel.buildModel([session({ goalMinutes: 50 })]);
+  const plan = FocusModel.recommendDailyPlan(model, [session()], {
+    dailyGoalMinutes: 360,
+    remainingGoalMinutes: 185,
+    shortBreakMinutes: 10,
+    longBreakMinutes: 25,
+    blocksBeforeLongBreak: 4,
+    completedBlocksSinceLongBreak: 1,
+    currentFocusRating: 4,
+    currentEnergy: 4
+  });
+
+  assert.equal(plan.goalMet, false);
+  assert.ok(plan.blocksRemaining >= 3);
+  assert.ok(plan.nextBlockMinutes >= 45);
+  assert.ok(plan.nextBreakMinutes >= 10);
+  assert.ok(plan.totalPlanMinutes >= plan.totalActiveMinutes);
+
+  const finalBlock = FocusModel.recommendDailyPlan(model, [], {
+    remainingGoalMinutes: 18,
+    currentFocusRating: 3,
+    currentEnergy: 3
+  });
+
+  assert.equal(finalBlock.blocksRemaining, 1);
+  assert.equal(finalBlock.nextBreakType, "optional");
 });

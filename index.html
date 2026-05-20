@@ -21,6 +21,10 @@
           </div>
         </div>
         <div class="window-actions">
+          <button class="icon-button theme-toggle" id="themeToggle" type="button" title="Switch to dark mode" aria-label="Switch to dark mode" aria-pressed="false">
+            <svg class="theme-icon sun-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4V2M12 22v-2M4.93 4.93 3.52 3.52M20.48 20.48l-1.41-1.41M4 12H2M22 12h-2M4.93 19.07l-1.41 1.41M20.48 3.52l-1.41 1.41M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8z"></path></svg>
+            <svg class="theme-icon moon-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A7.5 7.5 0 0 1 9.5 3.5 8.5 8.5 0 1 0 20.5 14.5z"></path></svg>
+          </button>
           <button class="icon-button" id="minimizeWindow" type="button" title="Minimize" aria-label="Minimize">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path></svg>
           </button>
@@ -34,17 +38,17 @@
       </header>
 
       <main class="workspace">
-        <section class="panel timer-panel" aria-labelledby="timerTitle">
+        <section class="panel timer-panel" id="timerPanel" aria-labelledby="timerTitle">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">Current block</p>
+              <p class="eyebrow">Now</p>
               <h2 id="timerTitle">Deep work timer</h2>
             </div>
             <span class="state-pill" id="timerState">Idle</span>
           </div>
 
           <div class="timer-grid">
-            <div class="timer-orbit" aria-label="Timer progress">
+            <div class="timer-orbit" id="timerOrbit" aria-label="Timer progress">
               <svg class="progress-ring" viewBox="0 0 260 260" aria-hidden="true">
                 <circle class="ring-track" cx="130" cy="130" r="108"></circle>
                 <circle class="ring-progress" id="blockProgressRing" cx="130" cy="130" r="108"></circle>
@@ -55,31 +59,17 @@
               </div>
             </div>
 
-            <div class="session-form">
-              <label>
-                <span>Task</span>
-                <input id="taskInput" type="text" maxlength="80" placeholder="Design review, client work, coding...">
-              </label>
-              <label>
-                <span>Project</span>
-                <input id="projectInput" type="text" maxlength="64" placeholder="Project or client">
-              </label>
-              <label>
-                <span>Tags</span>
-                <input id="tagsInput" type="text" maxlength="90" placeholder="writing, meetings, build, admin">
-              </label>
-
-              <div class="rating-row">
+            <div class="session-form" aria-label="Focus block controls">
+              <div class="quick-fields">
                 <label>
-                  <span>Energy</span>
-                  <input id="energyInput" type="range" min="1" max="5" value="4">
+                  <span>Task</span>
+                  <input id="taskInput" type="text" maxlength="80" placeholder="What are you focusing on?">
                 </label>
                 <label>
-                  <span>Focus</span>
-                  <input id="focusInput" type="range" min="1" max="5" value="4">
+                  <span>Project</span>
+                  <input id="projectInput" type="text" maxlength="64" placeholder="Project">
                 </label>
               </div>
-
               <div class="control-row">
                 <button class="primary-action" id="startButton" type="button">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>
@@ -97,151 +87,177 @@
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7v6h6M20 17a8 8 0 0 1-14.8-4M20 17v-6h-6M4 7a8 8 0 0 1 14.8 4"></path></svg>
                 </button>
               </div>
-
-              <div class="break-card">
-                <div class="break-card-header">
-                  <span>Recovery</span>
-                  <strong id="breakState">Break idle</strong>
-                </div>
-                <div class="break-time" id="breakDisplay">10:00</div>
-                <div class="break-meter" aria-hidden="true"><span id="breakProgressBar"></span></div>
-                <p id="breakAdvice">Finish a focus block to queue a researched recovery break.</p>
-                <div class="break-actions">
-                  <button class="secondary-action" id="startBreakButton" type="button">Start break</button>
-                  <button class="secondary-action" id="pauseBreakButton" type="button" disabled>Pause</button>
-                  <button class="ghost-action text-action" id="skipBreakButton" type="button" disabled>Skip</button>
-                </div>
-              </div>
             </div>
           </div>
         </section>
 
-        <aside class="panel goals-panel" aria-labelledby="goalTitle">
-          <div class="panel-heading compact">
-            <div>
-              <p class="eyebrow">Today</p>
-              <h2 id="goalTitle">Goals</h2>
-            </div>
-            <span id="todayDate" class="date-label"></span>
-          </div>
-
-          <div class="metric-stack">
-            <div class="metric-line">
-              <span>Active today</span>
-              <strong id="activeToday">0h 00m</strong>
-            </div>
-            <div class="meter" aria-hidden="true"><span id="dayGoalBar"></span></div>
-            <div class="metric-line subdued">
-              <span id="dayGoalText">0 of 6h</span>
-              <span id="remainingText">6h remaining</span>
-            </div>
-          </div>
-
-          <div class="manual-block">
-            <div class="slider-label">
-              <span>Hours already done</span>
-              <strong id="manualCreditText">0m added</strong>
-            </div>
-            <div class="manual-inputs">
-              <label>
-                <span>Hours</span>
-                <input id="manualHoursInput" type="number" min="0" max="24" step="0.25" value="0">
-              </label>
-              <label>
-                <span>Minutes</span>
-                <input id="manualMinutesInput" type="number" min="0" max="59" step="5" value="0">
-              </label>
-            </div>
-          </div>
-
-          <div class="slider-block">
-            <div class="slider-label">
-              <span>Daily goal</span>
-              <strong id="dailyGoalValue">6h</strong>
-            </div>
-            <input id="dailyGoalInput" type="range" min="1" max="12" step="0.25" value="6">
-          </div>
-
-          <div class="slider-block">
-            <div class="slider-label">
-              <span>Block goal</span>
-              <strong id="blockGoalValue">50m</strong>
-            </div>
-            <input id="blockGoalInput" type="range" min="10" max="120" step="5" value="50">
-          </div>
-
-          <div class="break-settings-grid">
-            <div class="slider-block compact-slider">
-              <div class="slider-label">
-                <span>Short break</span>
-                <strong id="shortBreakValue">10m</strong>
+        <aside class="side-rail" aria-label="Goals and settings">
+          <section class="panel goals-panel" aria-labelledby="sidePanelTitle">
+            <div class="panel-heading compact">
+              <div>
+                <p class="eyebrow">Side</p>
+                <h2 id="sidePanelTitle">Goals</h2>
               </div>
-              <input id="shortBreakInput" type="range" min="5" max="20" step="5" value="10">
+              <span id="todayDate" class="date-label"></span>
             </div>
-            <div class="slider-block compact-slider">
-              <div class="slider-label">
-                <span>Long break</span>
-                <strong id="longBreakValue">25m</strong>
+
+            <div class="tabs" role="tablist" aria-label="Side panel">
+              <button class="tab-button active" id="goalsTab" type="button" role="tab" aria-selected="true" aria-controls="goalsTabPanel">Goals</button>
+              <button class="tab-button" id="settingsTab" type="button" role="tab" aria-selected="false" aria-controls="settingsTabPanel">Settings</button>
+            </div>
+
+            <div class="tab-panel active" id="goalsTabPanel" role="tabpanel" aria-labelledby="goalsTab">
+              <form class="goal-entry" id="goalForm">
+                <input id="goalInput" type="text" maxlength="90" placeholder="Add a goal">
+                <button class="primary-action" id="addGoalButton" type="submit">Add</button>
+              </form>
+              <ul class="goal-list" id="goalList"></ul>
+              <button class="ghost-action text-action clear-completed" id="clearCompletedGoals" type="button">Clear done</button>
+            </div>
+
+            <div class="tab-panel" id="settingsTabPanel" role="tabpanel" aria-labelledby="settingsTab" hidden>
+              <div class="metric-stack">
+                <div class="metric-line">
+                  <span>Today</span>
+                  <strong id="activeToday">0h 00m</strong>
+                </div>
+                <div class="meter" aria-hidden="true"><span id="dayGoalBar"></span></div>
+                <div class="metric-line subdued">
+                  <span id="dayGoalText">0 of 6h</span>
+                  <span id="remainingText">6h remaining</span>
+                </div>
               </div>
-              <input id="longBreakInput" type="range" min="15" max="40" step="5" value="25">
-            </div>
-          </div>
 
-          <div class="goal-grid">
-            <div>
-              <span>Sessions</span>
-              <strong id="sessionCountToday">0</strong>
-            </div>
-            <div>
-              <span>Streak</span>
-              <strong id="streakDays">0d</strong>
-            </div>
-          </div>
-        </aside>
+              <div class="daily-plan">
+                <div>
+                  <span>Blocks left</span>
+                  <strong id="dailyPlanBlocks">0</strong>
+                </div>
+                <div>
+                  <span>Next focus</span>
+                  <strong id="dailyPlanNextBlock">50m</strong>
+                </div>
+                <div>
+                  <span>Plan time</span>
+                  <strong id="dailyPlanTotal">0m</strong>
+                </div>
+              </div>
 
-        <section class="panel insight-panel" aria-labelledby="insightTitle">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Local learning</p>
-              <h2 id="insightTitle">Focus fingerprint</h2>
-            </div>
-            <span class="score-pill" id="averageScore">0</span>
-          </div>
+              <div class="slider-block">
+                <div class="slider-label">
+                  <span>Daily goal</span>
+                  <strong id="dailyGoalValue">6h</strong>
+                </div>
+                <input id="dailyGoalInput" type="range" min="1" max="12" step="0.25" value="6">
+              </div>
 
-          <canvas id="patternCanvas" width="980" height="260" aria-label="Hourly focus pattern chart"></canvas>
+              <div class="slider-block">
+                <div class="slider-label">
+                  <span>Block</span>
+                  <strong id="blockGoalValue">50m</strong>
+                </div>
+                <input id="blockGoalInput" type="range" min="10" max="120" step="5" value="50">
+              </div>
 
-          <div class="insight-grid">
-            <div class="insight-line">
-              <span>Next best window</span>
-              <strong id="nextWindow">Gathering data</strong>
-            </div>
-            <div class="insight-line">
-              <span>Recommended block</span>
-              <strong id="recommendedBlock">50m</strong>
-            </div>
-            <div class="insight-line">
-              <span>Best hours</span>
-              <strong id="bestHours">No history yet</strong>
-            </div>
-            <div class="insight-line">
-              <span>Risk hours</span>
-              <strong id="riskHours">No history yet</strong>
-            </div>
-          </div>
-        </section>
+              <div class="rating-row">
+                <label>
+                  <span>Energy</span>
+                  <input id="energyInput" type="range" min="1" max="5" value="4">
+                </label>
+                <label>
+                  <span>Focus</span>
+                  <input id="focusInput" type="range" min="1" max="5" value="4">
+                </label>
+              </div>
 
-        <section class="panel history-panel" aria-labelledby="historyTitle">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">History</p>
+              <label class="tags-field">
+                <span>Tags</span>
+                <input id="tagsInput" type="text" maxlength="90" placeholder="writing, coding, admin">
+              </label>
+
+              <details class="more-settings">
+                <summary>More settings</summary>
+                <div class="manual-block">
+                  <div class="slider-label">
+                    <span>Added today</span>
+                    <strong id="manualCreditText">0m added</strong>
+                  </div>
+                  <div class="manual-inputs">
+                    <label>
+                      <span>Hours</span>
+                      <input id="manualHoursInput" type="number" min="0" max="24" step="0.25" value="0">
+                    </label>
+                    <label>
+                      <span>Minutes</span>
+                      <input id="manualMinutesInput" type="number" min="0" max="59" step="5" value="0">
+                    </label>
+                  </div>
+                </div>
+
+                <div class="goal-grid">
+                  <div>
+                    <span>Sessions</span>
+                    <strong id="sessionCountToday">0</strong>
+                  </div>
+                  <div>
+                    <span>Streak</span>
+                    <strong id="streakDays">0d</strong>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </section>
+
+          <details class="panel insight-panel auxiliary-panel">
+            <summary>
+              <span>Learning</span>
+              <strong id="averageScore">0</strong>
+            </summary>
+            <h2 id="insightTitle">Focus fingerprint</h2>
+            <canvas id="patternCanvas" width="980" height="260" aria-label="Hourly focus pattern chart"></canvas>
+            <div class="insight-grid">
+              <div class="insight-line">
+                <span>Next</span>
+                <strong id="nextWindow">Gathering data</strong>
+              </div>
+              <div class="insight-line">
+                <span>Block</span>
+                <strong id="recommendedBlock">50m</strong>
+              </div>
+              <div class="insight-line">
+                <span>Best</span>
+                <strong id="bestHours">No history yet</strong>
+              </div>
+              <div class="insight-line">
+                <span>Risk</span>
+                <strong id="riskHours">No history yet</strong>
+              </div>
+            </div>
+          </details>
+
+          <details class="panel history-panel auxiliary-panel">
+            <summary>
+              <span>Recent</span>
+              <span class="summary-count">Sessions</span>
+            </summary>
+            <div class="details-heading">
               <h2 id="historyTitle">Recent sessions</h2>
+              <button class="ghost-action text-action" id="clearHistoryButton" type="button">Clear</button>
             </div>
-            <button class="ghost-action text-action" id="clearHistoryButton" type="button">Clear</button>
-          </div>
-          <div class="session-list" id="sessionList"></div>
-        </section>
+            <div class="session-list" id="sessionList"></div>
+          </details>
+        </aside>
       </main>
     </div>
+
+    <section class="completion-overlay" id="completionOverlay" role="dialog" aria-modal="true" aria-labelledby="completionTitle" hidden>
+      <div class="completion-card">
+        <p class="eyebrow" id="completionEyebrow">Timer complete</p>
+        <h2 id="completionTitle">Focus block complete</h2>
+        <p id="completionMessage">Confirm to start your break.</p>
+        <button class="primary-action" id="completionConfirmButton" type="button">Confirm</button>
+      </div>
+    </section>
 
     <script src="focusModel.js"></script>
     <script src="app.js"></script>

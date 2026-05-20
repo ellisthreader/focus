@@ -1,6 +1,7 @@
 (function () {
   const STORAGE_KEY = "focus-pattern-tracker:v1";
   const RING_LENGTH = 678.58;
+  const THEME_VALUES = ["light", "dark"];
   const DEFAULT_SETTINGS = {
     dailyGoalMinutes: 360,
     blockGoalMinutes: 50,
@@ -63,25 +64,30 @@
   const FocusModel = window.FocusModel || fallbackModel;
 
   const defaultState = {
+    theme: "light",
+    sideTab: "goals",
     settings: { ...DEFAULT_SETTINGS },
     sessions: [],
     timer: createIdleTimer(),
-    breakTimer: createIdleBreakTimer(),
     manualDailyMinutes: {},
-    recovery: { completedBlocksSinceLongBreak: 0 }
+    goals: []
   };
 
   const dom = {};
-  let state = loadState();
+  let state = structuredClone(defaultState);
   let model = FocusModel.buildModel(state.sessions, modelSettings());
   let tickHandle = null;
+  let alarmContext = null;
+  let alarmRepeatHandle = null;
 
   document.addEventListener("DOMContentLoaded", init);
 
-  function init() {
+  async function init() {
     bindDom();
     bindEvents();
+    await hydrateState();
     hydrateControls();
+    applyTheme(state.theme);
     render();
     tickHandle = window.setInterval(render, 1000);
   }
@@ -89,6 +95,19 @@
   function bindDom() {
     [
       "modelStatus",
+      "themeToggle",
+      "timerPanel",
+      "timerTitle",
+      "timerOrbit",
+      "sidePanelTitle",
+      "goalsTab",
+      "settingsTab",
+      "goalsTabPanel",
+      "settingsTabPanel",
+      "goalForm",
+      "goalInput",
+      "goalList",
+      "clearCompletedGoals",
       "minimizeWindow",
       "maximizeWindow",
       "closeWindow",
@@ -126,36 +145,42 @@
       "manualHoursInput",
       "manualMinutesInput",
       "manualCreditText",
-      "shortBreakInput",
-      "shortBreakValue",
-      "longBreakInput",
-      "longBreakValue",
-      "breakState",
-      "breakDisplay",
-      "breakProgressBar",
-      "breakAdvice",
-      "startBreakButton",
-      "pauseBreakButton",
-      "skipBreakButton",
-      "clearHistoryButton"
+      "dailyPlanBlocks",
+      "dailyPlanNextBlock",
+      "dailyPlanTotal",
+      "clearHistoryButton",
+      "completionOverlay",
+      "completionEyebrow",
+      "completionTitle",
+      "completionMessage",
+      "completionConfirmButton"
     ].forEach((id) => {
       dom[id] = document.getElementById(id);
     });
   }
 
   function bindEvents() {
+    dom.themeToggle.addEventListener("click", toggleTheme);
     dom.minimizeWindow.addEventListener("click", () => window.focusDesktop?.minimize());
     dom.maximizeWindow.addEventListener("click", () => window.focusDesktop?.maximize());
     dom.closeWindow.addEventListener("click", () => window.focusDesktop?.close());
 
-    dom.startButton.addEventListener("click", startTimer);
+    dom.goalsTab.addEventListener("click", () => setActiveSideTab("goals"));
+    dom.settingsTab.addEventListener("click", () => setActiveSideTab("settings"));
+    dom.goalForm.addEventListener("submit", addGoal);
+    dom.clearCompletedGoals.addEventListener("click", clearCompletedGoals);
+    dom.goalList.addEventListener("change", handleGoalListChange);
+    dom.goalList.addEventListener("click", handleGoalListClick);
+
+    dom.startButton.addEventListener("click", () => startFocusTimer());
     dom.pauseButton.addEventListener("click", togglePause);
     dom.finishButton.addEventListener("click", finishTimer);
+    dom.completionConfirmButton.addEventListener("click", confirmTimerCompletion);
     dom.resetButton.addEventListener("click", resetTimer);
-    dom.clearHistoryButton.addEventListener("click", clearHistory);
-    dom.startBreakButton.addEventListener("click", startBreak);
-    dom.pauseBreakButton.addEventListener("click", toggleBreakPause);
-    dom.skipBreakButton.addEventListener("click", skipBreak);
+    dom.clearHistoryButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      clearHistory();
+    });
 
     dom.dailyGoalInput.addEventListener("input", () => {
       state.settings.dailyGoalMinutes = Math.round(Number(dom.dailyGoalInput.value) * 60);
@@ -167,19 +192,6 @@
       if (state.timer.status === "idle") {
         state.timer.goalMinutes = state.settings.blockGoalMinutes;
       }
-      persistAndRender();
-    });
-
-    dom.shortBreakInput.addEventListener("input", () => {
-      state.settings.shortBreakMinutes = Number(dom.shortBreakInput.value);
-      if (["idle", "ready", "completed"].includes(state.breakTimer.status)) {
-        state.breakTimer = createIdleBreakTimer();
-      }
-      persistAndRender();
-    });
-
-    dom.longBreakInput.addEventListener("input", () => {
-      state.settings.longBreakMinutes = Number(dom.longBreakInput.value);
       persistAndRender();
     });
 
@@ -197,7 +209,7 @@
     });
 
     window.addEventListener("beforeunload", () => {
-      persist();
+      persist(true);
       if (tickHandle) {
         window.clearInterval(tickHandle);
       }
@@ -207,25 +219,53 @@
   function hydrateControls() {
     dom.dailyGoalInput.value = String(state.settings.dailyGoalMinutes / 60);
     dom.blockGoalInput.value = String(state.settings.blockGoalMinutes);
-    dom.shortBreakInput.value = String(state.settings.shortBreakMinutes);
-    dom.longBreakInput.value = String(state.settings.longBreakMinutes);
     syncManualInputs(getDateKey(Date.now()));
     syncFormFromTimer();
+    setActiveSideTab(state.sideTab);
   }
 
-  function startTimer() {
+  function startFocusTimer(goalMinutes = null) {
     const now = Date.now();
+    const dailyPlan = getDailyPlan(now);
+    const nextGoalMinutes = goalMinutes || dailyPlan.nextBlockMinutes || FocusModel.recommendBlockLength(model, recentSessions(8).reverse()) || state.settings.blockGoalMinutes;
 
-    if (!["idle", "completed"].includes(state.breakTimer.status)) {
-      state.breakTimer = createIdleBreakTimer();
+    startTimer({
+      mode: "focus",
+      goalMinutes: nextGoalMinutes
+    });
+  }
+
+  function startBreakTimer(breakPlan) {
+    const plan = breakPlan && Number.isFinite(breakPlan.minutes) ? breakPlan : getRecommendedBreakPlan({ includeCurrentFocus: false });
+
+    startTimer({
+      mode: "break",
+      goalMinutes: plan.minutes,
+      breakType: plan.type
+    });
+  }
+
+  function startTimer(options = {}) {
+    const now = Date.now();
+    const mode = options.mode === "break" ? "break" : "focus";
+    const goalMinutes = clamp(
+      Math.round(Number(options.goalMinutes) || (mode === "break" ? state.settings.shortBreakMinutes : state.settings.blockGoalMinutes)),
+      mode === "break" ? 1 : 5,
+      mode === "break" ? 60 : 180
+    );
+
+    if (mode === "focus") {
+      readTimerFormIntoState();
     }
 
     state.timer = {
       id: createId(),
       status: "running",
-      title: dom.taskInput.value.trim(),
-      project: dom.projectInput.value.trim(),
-      tags: parseTags(dom.tagsInput.value),
+      mode,
+      breakType: mode === "break" ? options.breakType || "short" : null,
+      title: mode === "focus" ? dom.taskInput.value.trim() : state.timer.title || dom.taskInput.value.trim(),
+      project: mode === "focus" ? dom.projectInput.value.trim() : state.timer.project || dom.projectInput.value.trim(),
+      tags: mode === "focus" ? parseTags(dom.tagsInput.value) : state.timer.tags || parseTags(dom.tagsInput.value),
       startedAt: now,
       lastResumedAt: now,
       activeMs: 0,
@@ -234,9 +274,12 @@
       pauseCount: 0,
       focusRating: Number(dom.focusInput.value),
       energy: Number(dom.energyInput.value),
-      goalMinutes: state.settings.blockGoalMinutes
+      goalMinutes,
+      completedAt: null
     };
 
+    ensureAlarmReady();
+    clearCompletionAlert();
     persistAndRender();
   }
 
@@ -255,6 +298,7 @@
       state.timer.status = "running";
       state.timer.lastResumedAt = Date.now();
       state.timer.pauseStartedAt = null;
+      ensureAlarmReady();
       persistAndRender();
     }
   }
@@ -264,47 +308,246 @@
       return;
     }
 
-    readTimerFormIntoState();
-    const endedAt = Date.now();
-    const activeMs = getCurrentActiveMs();
-    const pausedMs = getCurrentPausedMs();
-    let completedSession = false;
-    const session = {
-      id: state.timer.id || createId(),
-      title: state.timer.title || "Untitled focus block",
-      project: state.timer.project || "General",
-      tags: state.timer.tags,
-      startedAt: state.timer.startedAt || endedAt,
-      endedAt,
-      durationMs: Math.max(0, endedAt - (state.timer.startedAt || endedAt)),
-      activeMs,
-      pausedMs,
-      pauseCount: state.timer.pauseCount,
-      focusRating: state.timer.focusRating,
-      energy: state.timer.energy,
-      goalMinutes: state.timer.goalMinutes
-    };
-
-    if (session.activeMs >= 1000) {
-      state.sessions.push(session);
-      state.sessions = state.sessions.slice(-600);
-      completedSession = true;
-      state.recovery.completedBlocksSinceLongBreak += 1;
+    if (state.timer.status === "complete") {
+      confirmTimerCompletion();
+      return;
     }
 
-    state.timer = createIdleTimer();
-    syncFormFromTimer();
-    rebuildModel();
-    if (completedSession) {
-      prepareBreakTimer();
-    }
+    markTimerComplete(Date.now(), true);
     persistAndRender();
   }
 
   function resetTimer() {
     state.timer = createIdleTimer();
+    clearCompletionAlert();
     syncFormFromTimer();
     persistAndRender();
+  }
+
+  function checkTimerCompletion(now) {
+    if (state.timer.status !== "running") {
+      return false;
+    }
+
+    if (getCurrentActiveMs() < getTimerGoalMs()) {
+      return false;
+    }
+
+    markTimerComplete(now, false);
+    persist();
+    return true;
+  }
+
+  function markTimerComplete(now, allowEarly) {
+    if (!["running", "paused"].includes(state.timer.status)) {
+      return;
+    }
+
+    if ((state.timer.mode || "focus") === "focus") {
+      readTimerFormIntoState();
+    }
+
+    state.timer.activeMs = allowEarly ? getCurrentActiveMs() : getTimerGoalMs();
+    state.timer.pausedMs = getCurrentPausedMs();
+    state.timer.status = "complete";
+    state.timer.completedAt = now;
+    state.timer.lastResumedAt = null;
+    state.timer.pauseStartedAt = null;
+    triggerCompletionAlert();
+  }
+
+  function confirmTimerCompletion() {
+    if (state.timer.status !== "complete") {
+      return;
+    }
+
+    const completedMode = state.timer.mode || "focus";
+    clearCompletionAlert();
+
+    if (completedMode === "break") {
+      startFocusTimer();
+      return;
+    }
+
+    const session = createSessionFromTimer();
+    if (session.activeMs >= 1000) {
+      state.sessions.push(session);
+      state.sessions = state.sessions.slice(-600);
+    }
+
+    rebuildModel();
+    startBreakTimer(getRecommendedBreakPlan({ includeCurrentFocus: false, completedAt: session.endedAt, currentBlockMinutes: session.goalMinutes }));
+  }
+
+  function createSessionFromTimer() {
+    const endedAt = state.timer.completedAt || Date.now();
+    const startedAt = state.timer.startedAt || endedAt;
+    return {
+      id: state.timer.id || createId(),
+      title: state.timer.title || "Untitled focus block",
+      project: state.timer.project || "General",
+      tags: state.timer.tags || [],
+      startedAt,
+      endedAt,
+      durationMs: Math.max(0, endedAt - startedAt),
+      activeMs: Math.max(0, state.timer.activeMs || 0),
+      pausedMs: Math.max(0, state.timer.pausedMs || 0),
+      pauseCount: state.timer.pauseCount || 0,
+      focusRating: state.timer.focusRating,
+      energy: state.timer.energy,
+      goalMinutes: state.timer.goalMinutes
+    };
+  }
+
+  function getRecommendedBreakPlan(options = {}) {
+    const completedAt = options.completedAt || Date.now();
+    const completedBlocks = getCompletedFocusBlocksToday(completedAt) + (options.includeCurrentFocus ? 1 : 0);
+    const blocksBeforeLongBreak = Math.max(1, Number(state.settings.blocksBeforeLongBreak) || DEFAULT_SETTINGS.blocksBeforeLongBreak);
+    const forceLongBreak = completedBlocks > 0 && completedBlocks % blocksBeforeLongBreak === 0;
+    const currentBlockMinutes = Number(options.currentBlockMinutes || state.timer.goalMinutes || state.settings.blockGoalMinutes);
+
+    if (FocusModel.recommendBreakLength) {
+      return FocusModel.recommendBreakLength(model, recentSessions(8).reverse(), {
+        ...state.settings,
+        currentBlockMinutes,
+        forceLongBreak
+      });
+    }
+
+    return {
+      type: forceLongBreak ? "long" : "short",
+      minutes: forceLongBreak ? state.settings.longBreakMinutes : state.settings.shortBreakMinutes,
+      confidence: 0.25,
+      reason: "Research default"
+    };
+  }
+
+  function getCompletedFocusBlocksToday(now) {
+    const day = new Date(now);
+    const start = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
+    const end = start + 86400000;
+
+    return state.sessions.filter((session) => session.startedAt >= start && session.startedAt < end).length;
+  }
+
+  function getTimerGoalMs() {
+    return Math.max(1000, (Number(state.timer.goalMinutes) || state.settings.blockGoalMinutes) * 60000);
+  }
+
+  function triggerCompletionAlert() {
+    syncCompletionOverlay();
+    document.body.classList.add("timer-alerting");
+    if (dom.timerPanel) {
+      dom.timerPanel.classList.remove("timer-shake");
+      void dom.timerPanel.offsetWidth;
+      dom.timerPanel.classList.add("timer-shake");
+    }
+    playCompletionAlarm();
+    window.focusDesktop?.prioritize?.();
+    dom.completionConfirmButton?.focus({ preventScroll: true });
+  }
+
+  function clearCompletionAlert() {
+    stopCompletionAlarm();
+    document.body.classList.remove("timer-alerting");
+    dom.timerPanel?.classList.remove("timer-shake");
+    if (dom.completionOverlay) {
+      dom.completionOverlay.hidden = true;
+    }
+  }
+
+  function syncCompletionOverlay() {
+    if (!dom.completionOverlay) {
+      return;
+    }
+
+    if (state.timer.status !== "complete") {
+      dom.completionOverlay.hidden = true;
+      return;
+    }
+
+    const mode = state.timer.mode === "break" ? "break" : "focus";
+    dom.completionOverlay.hidden = false;
+
+    if (mode === "break") {
+      const nextGoal = getNextFocusMinutes();
+      dom.completionEyebrow.textContent = "Break complete";
+      dom.completionTitle.textContent = "Break time is up";
+      dom.completionMessage.textContent = "Confirm to start the next " + nextGoal + "m focus block.";
+      dom.completionConfirmButton.textContent = "Start " + nextGoal + "m focus";
+      return;
+    }
+
+    const breakPlan = getRecommendedBreakPlan({ includeCurrentFocus: true });
+    const breakLabel = breakPlan.type === "long" ? "long break" : "break";
+    dom.completionEyebrow.textContent = "Focus complete";
+    dom.completionTitle.textContent = "Focus block complete";
+    dom.completionMessage.textContent = "Confirm finish to start a " + breakPlan.minutes + "m " + breakLabel + ".";
+    dom.completionConfirmButton.textContent = "Start " + breakPlan.minutes + "m " + (breakPlan.type === "long" ? "long break" : "break");
+  }
+
+  function getNextFocusMinutes() {
+    const dailyPlan = getDailyPlan(Date.now());
+    return Math.round(dailyPlan.nextBlockMinutes || FocusModel.recommendBlockLength(model, recentSessions(8).reverse()) || model.suggestedGoalMinutes || state.settings.blockGoalMinutes);
+  }
+
+  function ensureAlarmReady() {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) {
+        return null;
+      }
+      if (!alarmContext) {
+        alarmContext = new AudioContext();
+      }
+      if (alarmContext.state === "suspended") {
+        alarmContext.resume().catch(() => {});
+      }
+      return alarmContext;
+    } catch (error) {
+      console.warn("Unable to prepare timer alarm", error);
+      return null;
+    }
+  }
+
+  function playCompletionAlarm() {
+    if (alarmRepeatHandle) {
+      return;
+    }
+
+    playAlarmPattern();
+    alarmRepeatHandle = window.setInterval(playAlarmPattern, 2600);
+  }
+
+  function stopCompletionAlarm() {
+    if (alarmRepeatHandle) {
+      window.clearInterval(alarmRepeatHandle);
+      alarmRepeatHandle = null;
+    }
+  }
+
+  function playAlarmPattern() {
+    const context = ensureAlarmReady();
+    if (!context) {
+      return;
+    }
+
+    const startAt = context.currentTime + 0.03;
+    [0, 0.24, 0.48, 0.72, 1.04, 1.28].forEach((offset, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const start = startAt + offset;
+
+      oscillator.type = index % 2 === 0 ? "square" : "sawtooth";
+      oscillator.frequency.setValueAtTime(index % 2 === 0 ? 980 : 740, start);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.22, start + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.2);
+    });
   }
 
   function clearHistory() {
@@ -325,12 +568,14 @@
 
   function render() {
     const now = Date.now();
-    updateBreakCompletion(now);
+    checkTimerCompletion(now);
+
     const activeMs = getCurrentActiveMs();
     const pausedMs = getCurrentPausedMs();
-    const blockGoalMs = Math.max(1, (state.timer.goalMinutes || state.settings.blockGoalMinutes) * 60000);
+    const blockGoalMs = getTimerGoalMs();
     const blockProgress = clamp(activeMs / blockGoalMs, 0, 1);
-    const displayMs = state.timer.status === "idle" ? 0 : activeMs;
+    const displayMs = state.timer.status === "idle" ? 0 : Math.max(0, blockGoalMs - activeMs);
+    const timerMode = state.timer.mode === "break" ? "break" : "focus";
     const sessionsForToday = getSessionsWithCurrentTimer(now);
     const today = FocusModel.summarizeToday(sessionsForToday, now);
     const trackedActiveMs = today.activeMs || today.totalActiveMs || 0;
@@ -340,18 +585,24 @@
     const todayCount = today.sessionCount || today.sessions || 0;
     const dayGoalMs = Math.max(1, state.settings.dailyGoalMinutes * 60000);
     const dayProgress = clamp(todayActiveMs / dayGoalMs, 0, 1);
-    const breakPlan = getBreakPlan();
+    const dailyPlan = getDailyPlan(now, todayActiveMs);
     const prediction = FocusModel.predictNextFocusWindow(model, new Date(now));
     const recommendation = FocusModel.recommendBlockLength(model, recentSessions(8).reverse());
 
+    updateThemeToggle();
+    dom.timerTitle.textContent = timerMode === "break" ? "Break timer" : "Deep work timer";
     dom.timerDisplay.textContent = formatClock(displayMs);
     dom.timerState.textContent = timerLabel();
     dom.pauseButton.querySelector("span").textContent = state.timer.status === "paused" ? "Resume" : "Pause";
-    dom.blockProgressText.textContent = `${Math.round(blockProgress * 100)}% of block`;
+    dom.finishButton.querySelector("span").textContent = state.timer.status === "complete" ? "Confirm" : timerMode === "break" ? "End break" : "Finish";
+    dom.blockProgressText.textContent = state.timer.status === "idle"
+      ? "0% of block"
+      : `${Math.round(blockProgress * 100)}% of ${timerMode === "break" ? "break" : "block"}`;
     dom.blockProgressRing.style.strokeDashoffset = String(RING_LENGTH - RING_LENGTH * blockProgress);
+    dom.timerOrbit.dataset.mode = timerMode;
 
     dom.startButton.disabled = state.timer.status !== "idle";
-    dom.pauseButton.disabled = state.timer.status === "idle";
+    dom.pauseButton.disabled = state.timer.status === "idle" || state.timer.status === "complete";
     dom.finishButton.disabled = state.timer.status === "idle";
     dom.resetButton.disabled = state.timer.status === "idle";
 
@@ -366,26 +617,24 @@
     dom.remainingText.textContent = `${formatShortDuration(Math.max(0, dayGoalMs - todayActiveMs))} remaining`;
     dom.dailyGoalValue.textContent = formatGoalHours(state.settings.dailyGoalMinutes);
     dom.blockGoalValue.textContent = `${state.settings.blockGoalMinutes}m`;
-    dom.shortBreakValue.textContent = `${state.settings.shortBreakMinutes}m`;
-    dom.longBreakValue.textContent = `${state.settings.longBreakMinutes}m`;
     dom.manualCreditText.textContent = `${formatShortDuration(manualMs)} added`;
+    renderDailyPlan(dailyPlan);
     syncManualInputsIfNeeded(now);
+    renderGoals();
     dom.sessionCountToday.textContent = String(todayCount);
     dom.streakDays.textContent = `${model.streakDays || 0}d`;
     dom.averageScore.textContent = `${Math.round(model.averageFocusScore || 0)}`;
     dom.nextWindow.textContent = model.sessionCount ? formatPrediction(prediction) : "After first session";
-    dom.recommendedBlock.textContent = `${Math.round(recommendation || model.suggestedGoalMinutes || state.settings.blockGoalMinutes)}m`;
+    dom.recommendedBlock.textContent = `${Math.round(dailyPlan.nextBlockMinutes || recommendation || model.suggestedGoalMinutes || state.settings.blockGoalMinutes)}m`;
     dom.bestHours.textContent = model.sessionCount ? formatHours(model.bestHours) : "No history yet";
     dom.riskHours.textContent = model.sessionCount ? formatHours(model.riskHours) : "No history yet";
-    dom.modelStatus.textContent = `${state.sessions.length} sessions learned locally`;
-    renderBreak(now, breakPlan);
+    dom.modelStatus.textContent = `${state.sessions.length} sessions saved in local database`;
 
     drawPatternCanvas();
     renderSessions();
 
-    if (pausedMs > 0) {
-      document.body.dataset.paused = state.timer.status === "paused" ? "true" : "false";
-    }
+    document.body.dataset.paused = pausedMs > 0 && state.timer.status === "paused" ? "true" : "false";
+    syncCompletionOverlay();
   }
 
   function drawPatternCanvas() {
@@ -412,11 +661,12 @@
     const chartHeight = cssHeight - padding.top - padding.bottom;
     const scores = getHourlyScores();
     const maxScore = 100;
+    const colors = getThemeColors();
 
-    context.fillStyle = "#ffffff";
+    context.fillStyle = colors.canvasBg;
     context.fillRect(0, 0, cssWidth, cssHeight);
 
-    context.strokeStyle = "#dfe5dc";
+    context.strokeStyle = colors.canvasLine;
     context.lineWidth = 1;
     context.beginPath();
     for (let i = 0; i <= 4; i += 1) {
@@ -434,14 +684,14 @@
       const barHeight = Math.max(6, normalized * chartHeight);
       const y = padding.top + chartHeight - barHeight;
       const gradient = context.createLinearGradient(0, y, 0, y + barHeight);
-      gradient.addColorStop(0, score >= 70 ? "#1f9d65" : score >= 52 ? "#246bfe" : "#e3574f");
-      gradient.addColorStop(1, "rgba(21, 25, 22, 0.22)");
+      gradient.addColorStop(0, score >= 70 ? colors.green : score >= 52 ? colors.blue : colors.coral);
+      gradient.addColorStop(1, colors.chartShadow);
       roundedRect(context, x, y, barWidth, barHeight, 5);
       context.fillStyle = gradient;
       context.fill();
     });
 
-    context.fillStyle = "#6c746d";
+    context.fillStyle = colors.muted;
     context.font = "700 11px Inter, system-ui, sans-serif";
     context.textAlign = "center";
     [0, 6, 12, 18, 23].forEach((hour) => {
@@ -449,7 +699,7 @@
       context.fillText(formatHour(hour), x, cssHeight - 12);
     });
 
-    context.fillStyle = "#151916";
+    context.fillStyle = colors.ink;
     context.font = "800 12px Inter, system-ui, sans-serif";
     context.textAlign = "left";
     context.fillText("Hourly focus score", padding.left, 16);
@@ -498,6 +748,110 @@
       .join("");
   }
 
+  function renderDailyPlan(plan) {
+    if (plan.goalMet) {
+      dom.dailyPlanBlocks.textContent = "Done";
+      dom.dailyPlanNextBlock.textContent = "0m";
+      dom.dailyPlanTotal.textContent = "Goal met";
+      return;
+    }
+
+    dom.dailyPlanBlocks.textContent = String(plan.blocksRemaining);
+    dom.dailyPlanNextBlock.textContent = `${plan.nextBlockMinutes}m`;
+    dom.dailyPlanTotal.textContent = formatPlanMinutes(plan.totalPlanMinutes);
+  }
+
+  function renderGoals() {
+    const goals = state.goals || [];
+    const completedCount = goals.filter((goal) => goal.completed).length;
+    dom.clearCompletedGoals.disabled = completedCount === 0;
+
+    if (goals.length === 0) {
+      dom.goalList.innerHTML = `<li class="goal-empty">No goals yet.</li>`;
+      return;
+    }
+
+    dom.goalList.innerHTML = goals
+      .map((goal) => `
+        <li class="goal-item${goal.completed ? " completed" : ""}">
+          <label>
+            <input type="checkbox" data-goal-id="${escapeHtml(goal.id)}"${goal.completed ? " checked" : ""}>
+            <span>${escapeHtml(goal.text)}</span>
+          </label>
+          <button class="icon-button small remove-goal" type="button" data-goal-id="${escapeHtml(goal.id)}" aria-label="Remove goal" title="Remove goal">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+          </button>
+        </li>
+      `)
+      .join("");
+  }
+
+  function setActiveSideTab(tab) {
+    const activeTab = tab === "settings" ? "settings" : "goals";
+    state.sideTab = activeTab;
+    dom.sidePanelTitle.textContent = activeTab === "settings" ? "Settings" : "Goals";
+
+    const isGoals = activeTab === "goals";
+    dom.goalsTab.classList.toggle("active", isGoals);
+    dom.settingsTab.classList.toggle("active", !isGoals);
+    dom.goalsTab.setAttribute("aria-selected", String(isGoals));
+    dom.settingsTab.setAttribute("aria-selected", String(!isGoals));
+    dom.goalsTabPanel.hidden = !isGoals;
+    dom.settingsTabPanel.hidden = isGoals;
+    dom.goalsTabPanel.classList.toggle("active", isGoals);
+    dom.settingsTabPanel.classList.toggle("active", !isGoals);
+    persist();
+  }
+
+  function addGoal(event) {
+    event.preventDefault();
+    const text = dom.goalInput.value.trim();
+    if (!text) {
+      return;
+    }
+
+    state.goals.unshift({
+      id: createId(),
+      text,
+      completed: false,
+      createdAt: Date.now()
+    });
+    state.goals = state.goals.slice(0, 80);
+    dom.goalInput.value = "";
+    persistAndRender();
+  }
+
+  function handleGoalListChange(event) {
+    const input = event.target.closest("input[type='checkbox'][data-goal-id]");
+    if (!input) {
+      return;
+    }
+
+    const goal = state.goals.find((item) => item.id === input.dataset.goalId);
+    if (!goal) {
+      return;
+    }
+
+    goal.completed = input.checked;
+    goal.completedAt = input.checked ? Date.now() : null;
+    persistAndRender();
+  }
+
+  function handleGoalListClick(event) {
+    const button = event.target.closest(".remove-goal[data-goal-id]");
+    if (!button) {
+      return;
+    }
+
+    state.goals = state.goals.filter((goal) => goal.id !== button.dataset.goalId);
+    persistAndRender();
+  }
+
+  function clearCompletedGoals() {
+    state.goals = state.goals.filter((goal) => !goal.completed);
+    persistAndRender();
+  }
+
   function readTimerFormIntoState() {
     state.timer.title = dom.taskInput.value.trim();
     state.timer.project = dom.projectInput.value.trim();
@@ -531,7 +885,7 @@
   }
 
   function getSessionsWithCurrentTimer(now) {
-    if (state.timer.status === "idle") {
+    if (state.timer.status === "idle" || state.timer.mode === "break") {
       return state.sessions;
     }
 
@@ -541,8 +895,8 @@
       project: state.timer.project,
       tags: state.timer.tags,
       startedAt: state.timer.startedAt || now,
-      endedAt: now,
-      durationMs: Math.max(0, now - (state.timer.startedAt || now)),
+      endedAt: state.timer.completedAt || now,
+      durationMs: Math.max(0, (state.timer.completedAt || now) - (state.timer.startedAt || now)),
       activeMs: getCurrentActiveMs(),
       pausedMs: getCurrentPausedMs(),
       pauseCount: state.timer.pauseCount,
@@ -582,30 +936,200 @@
     render();
   }
 
-  function persist() {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  function persist(sync = false) {
+    const snapshot = structuredClone(state);
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    } catch (error) {
+      console.warn("Unable to mirror focus tracker state to browser storage", error);
+    }
+
+    if (!window.focusDesktop?.saveData) {
+      return;
+    }
+
+    if (sync && window.focusDesktop.saveDataSync) {
+      const result = window.focusDesktop.saveDataSync(snapshot);
+      if (result && result.ok === false) {
+        console.warn("Unable to save focus tracker database", result.error);
+      }
+      return;
+    }
+
+    window.focusDesktop.saveData(snapshot)
+      .then((result) => {
+        if (result && result.ok === false) {
+          console.warn("Unable to save focus tracker database", result.error);
+        }
+      })
+      .catch((error) => {
+        console.warn("Unable to save focus tracker database", error);
+      });
   }
 
-  function loadState() {
+  function toggleTheme() {
+    state.theme = state.theme === "dark" ? "light" : "dark";
+    applyTheme(state.theme);
+    persistAndRender();
+  }
+
+  function applyTheme(theme) {
+    const normalizedTheme = normalizeTheme(theme);
+    document.documentElement.dataset.theme = normalizedTheme;
+    document.documentElement.style.colorScheme = normalizedTheme;
+  }
+
+  function updateThemeToggle() {
+    const isDark = state.theme === "dark";
+    const label = isDark ? "Switch to light mode" : "Switch to dark mode";
+    dom.themeToggle.title = label;
+    dom.themeToggle.setAttribute("aria-label", label);
+    dom.themeToggle.setAttribute("aria-pressed", String(isDark));
+  }
+
+  async function hydrateState() {
+    state = normalizeState(await loadState());
+    rebuildModel();
+  }
+
+  async function loadState() {
+    const databaseState = await loadDatabaseState();
+    if (databaseState) {
+      return databaseState;
+    }
+
+    const browserState = loadBrowserState();
+    if (browserState) {
+      state = normalizeState(browserState);
+      persist();
+      return browserState;
+    }
+
+    return structuredClone(defaultState);
+  }
+
+  async function loadDatabaseState() {
+    if (!window.focusDesktop?.loadData) {
+      return null;
+    }
+
+    try {
+      const result = await window.focusDesktop.loadData();
+      if (result?.state) {
+        return result.state;
+      }
+      if (result && result.ok === false) {
+        console.warn("Unable to load focus tracker database", result.error);
+      }
+    } catch (error) {
+      console.warn("Unable to load focus tracker database", error);
+    }
+
+    return null;
+  }
+
+  function loadBrowserState() {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (!raw) {
-        return structuredClone(defaultState);
+        return null;
       }
 
-      const parsed = JSON.parse(raw);
-      return {
-        settings: normalizeSettings(parsed.settings),
-        sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
-        timer: normalizeTimer(parsed.timer),
-        breakTimer: normalizeBreakTimer(parsed.breakTimer),
-        manualDailyMinutes: normalizeManualDailyMinutes(parsed.manualDailyMinutes),
-        recovery: normalizeRecovery(parsed.recovery)
-      };
+      return JSON.parse(raw);
     } catch (error) {
       console.warn("Unable to load saved focus tracker state", error);
-      return structuredClone(defaultState);
+      return null;
     }
+  }
+
+  function normalizeState(savedState) {
+    const parsed = savedState && typeof savedState === "object" ? savedState : {};
+    return {
+      theme: normalizeTheme(parsed.theme),
+      sideTab: parsed.sideTab === "settings" ? "settings" : "goals",
+      settings: normalizeSettings(parsed.settings),
+      sessions: normalizeSessions(parsed.sessions),
+      timer: normalizeTimer(parsed.timer),
+      manualDailyMinutes: normalizeManualDailyMinutes(parsed.manualDailyMinutes),
+      goals: normalizeGoals(parsed.goals)
+    };
+  }
+
+  function normalizeGoals(goals) {
+    if (!Array.isArray(goals)) {
+      return [];
+    }
+
+    return goals
+      .map((goal) => {
+        if (!goal || typeof goal !== "object") {
+          return null;
+        }
+
+        const text = String(goal.text || "").trim();
+        if (!text) {
+          return null;
+        }
+
+        return {
+          id: String(goal.id || createId()),
+          text: text.slice(0, 90),
+          completed: Boolean(goal.completed),
+          createdAt: normalizeTimestamp(goal.createdAt) || Date.now(),
+          completedAt: goal.completed ? normalizeTimestamp(goal.completedAt) : null
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 80);
+  }
+
+  function normalizeSessions(sessions) {
+    if (!Array.isArray(sessions)) {
+      return [];
+    }
+
+    return sessions
+      .map(normalizeSession)
+      .filter(Boolean)
+      .slice(-600);
+  }
+
+  function normalizeSession(session) {
+    if (!session || typeof session !== "object") {
+      return null;
+    }
+
+    const startedAt = normalizeTimestamp(session.startedAt);
+    const endedAt = normalizeTimestamp(session.endedAt);
+    if (!startedAt) {
+      return null;
+    }
+
+    return {
+      id: String(session.id || createId()),
+      title: String(session.title || "Untitled focus block"),
+      project: String(session.project || "General"),
+      tags: Array.isArray(session.tags) ? session.tags.map(String).slice(0, 8) : [],
+      startedAt,
+      endedAt: endedAt || startedAt,
+      durationMs: Math.max(0, Number(session.durationMs) || Math.max(0, (endedAt || startedAt) - startedAt)),
+      activeMs: Math.max(0, Number(session.activeMs) || 0),
+      pausedMs: Math.max(0, Number(session.pausedMs) || 0),
+      pauseCount: Math.max(0, Number(session.pauseCount) || 0),
+      focusRating: clamp(Number(session.focusRating) || 4, 1, 5),
+      energy: clamp(Number(session.energy) || 4, 1, 5),
+      goalMinutes: clamp(Number(session.goalMinutes) || DEFAULT_SETTINGS.blockGoalMinutes, 10, 180)
+    };
+  }
+
+  function normalizeTimestamp(value) {
+    const numericValue = Number(value);
+    if (Number.isFinite(numericValue)) {
+      return numericValue;
+    }
+
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   function normalizeSettings(settings) {
@@ -616,25 +1140,8 @@
     return normalized;
   }
 
-  function normalizeBreakTimer(timer) {
-    if (!timer || typeof timer !== "object") {
-      return createIdleBreakTimer();
-    }
-
-    const normalized = { ...createIdleBreakTimer(), ...timer };
-    if (!["idle", "ready", "running", "paused", "completed"].includes(normalized.status)) {
-      normalized.status = "idle";
-    }
-    normalized.totalMs = Math.max(60000, Number(normalized.totalMs) || DEFAULT_SETTINGS.shortBreakMinutes * 60000);
-    normalized.remainingMs = Math.max(0, Number(normalized.remainingMs) || normalized.totalMs);
-    if (normalized.status === "running" && normalized.lastStartedAt) {
-      normalized.remainingMs = Math.max(0, normalized.remainingMs - (Date.now() - normalized.lastStartedAt));
-      normalized.lastStartedAt = Date.now();
-      if (normalized.remainingMs === 0) {
-        normalized.status = "completed";
-      }
-    }
-    return normalized;
+  function normalizeTheme(theme) {
+    return THEME_VALUES.includes(theme) ? theme : defaultState.theme;
   }
 
   function normalizeManualDailyMinutes(value) {
@@ -645,21 +1152,18 @@
     return Object.fromEntries(Object.entries(value).map(([key, minutes]) => [key, clamp(Number(minutes) || 0, 0, 1440)]));
   }
 
-  function normalizeRecovery(value) {
-    return {
-      completedBlocksSinceLongBreak: Math.max(0, Number(value?.completedBlocksSinceLongBreak) || 0)
-    };
-  }
-
   function normalizeTimer(timer) {
     if (!timer || typeof timer !== "object") {
       return createIdleTimer();
     }
 
     const normalized = { ...createIdleTimer(), ...timer };
-    if (!["idle", "running", "paused"].includes(normalized.status)) {
+    if (!["idle", "running", "paused", "complete"].includes(normalized.status)) {
       normalized.status = "idle";
     }
+    normalized.mode = normalized.mode === "break" ? "break" : "focus";
+    normalized.breakType = normalized.mode === "break" ? normalized.breakType || "short" : null;
+    normalized.completedAt = normalized.completedAt ? normalizeTimestamp(normalized.completedAt) : null;
     if (normalized.status === "running" && !normalized.lastResumedAt) {
       normalized.lastResumedAt = Date.now();
     }
@@ -670,6 +1174,8 @@
     return {
       id: null,
       status: "idle",
+      mode: "focus",
+      breakType: null,
       title: "",
       project: "",
       tags: [],
@@ -681,21 +1187,8 @@
       pauseCount: 0,
       focusRating: 4,
       energy: 4,
-      goalMinutes: DEFAULT_SETTINGS.blockGoalMinutes
-    };
-  }
-
-  function createIdleBreakTimer() {
-    const minutes = DEFAULT_SETTINGS.shortBreakMinutes;
-    return {
-      status: "idle",
-      type: "short",
-      minutes,
-      totalMs: minutes * 60000,
-      remainingMs: minutes * 60000,
-      lastStartedAt: null,
-      completedAt: null,
-      reason: "Research default"
+      goalMinutes: DEFAULT_SETTINGS.blockGoalMinutes,
+      completedAt: null
     };
   }
 
@@ -740,121 +1233,37 @@
     return year + "-" + month + "-" + day;
   }
 
-  function getBreakPlan(forceLong = false) {
-    const blocks = state.recovery.completedBlocksSinceLongBreak || 0;
-    const isLong = forceLong || (blocks > 0 && blocks % state.settings.blocksBeforeLongBreak === 0);
-    if (FocusModel.recommendBreakLength) {
-      return FocusModel.recommendBreakLength(model, recentSessions(8).reverse(), {
+  function getDailyPlan(now, todayActiveMs = null) {
+    const currentActiveMs = todayActiveMs ?? getTodayActiveMs(now);
+    const remainingGoalMinutes = Math.max(0, Math.ceil((state.settings.dailyGoalMinutes * 60000 - currentActiveMs) / 60000));
+
+    if (FocusModel.recommendDailyPlan) {
+      return FocusModel.recommendDailyPlan(model, recentSessions(8).reverse(), {
         ...state.settings,
-        forceLongBreak: isLong
+        remainingGoalMinutes,
+        completedBlocksSinceLongBreak: getCompletedFocusBlocksToday(now) % Math.max(1, Number(state.settings.blocksBeforeLongBreak) || DEFAULT_SETTINGS.blocksBeforeLongBreak),
+        currentFocusRating: Number(dom.focusInput?.value || state.timer.focusRating || 4),
+        currentEnergy: Number(dom.energyInput?.value || state.timer.energy || 4)
       });
     }
+
     return {
-      type: isLong ? "long" : "short",
-      minutes: isLong ? state.settings.longBreakMinutes : state.settings.shortBreakMinutes,
-      confidence: 0.25,
-      reason: "Research default"
+      goalMet: remainingGoalMinutes <= 0,
+      blocksRemaining: remainingGoalMinutes <= 0 ? 0 : Math.max(1, Math.ceil(remainingGoalMinutes / state.settings.blockGoalMinutes)),
+      nextBlockMinutes: Math.min(remainingGoalMinutes, state.settings.blockGoalMinutes),
+      nextBreakMinutes: remainingGoalMinutes > state.settings.blockGoalMinutes ? state.settings.shortBreakMinutes : 0,
+      nextBreakType: "short",
+      plannedBreakMinutes: 0,
+      totalActiveMinutes: remainingGoalMinutes,
+      totalPlanMinutes: remainingGoalMinutes
     };
   }
 
-  function prepareBreakTimer() {
-    const plan = getBreakPlan();
-    state.breakTimer = {
-      status: "ready",
-      type: plan.type,
-      minutes: plan.minutes,
-      totalMs: plan.minutes * 60000,
-      remainingMs: plan.minutes * 60000,
-      lastStartedAt: null,
-      completedAt: null,
-      reason: plan.reason
-    };
-
-    if (plan.type === "long") {
-      state.recovery.completedBlocksSinceLongBreak = 0;
-    }
-  }
-
-  function startBreak() {
-    if (["idle", "completed"].includes(state.breakTimer.status)) {
-      const plan = getBreakPlan();
-      state.breakTimer = {
-        status: "ready",
-        type: plan.type,
-        minutes: plan.minutes,
-        totalMs: plan.minutes * 60000,
-        remainingMs: plan.minutes * 60000,
-        lastStartedAt: null,
-        completedAt: null,
-        reason: plan.reason
-      };
-    }
-
-    state.breakTimer.status = "running";
-    state.breakTimer.lastStartedAt = Date.now();
-    persistAndRender();
-  }
-
-  function toggleBreakPause() {
-    if (state.breakTimer.status === "running") {
-      state.breakTimer.remainingMs = getBreakRemainingMs(Date.now());
-      state.breakTimer.status = "paused";
-      state.breakTimer.lastStartedAt = null;
-      persistAndRender();
-      return;
-    }
-
-    if (state.breakTimer.status === "paused") {
-      state.breakTimer.status = "running";
-      state.breakTimer.lastStartedAt = Date.now();
-      persistAndRender();
-    }
-  }
-
-  function skipBreak() {
-    state.breakTimer = createIdleBreakTimer();
-    persistAndRender();
-  }
-
-  function getBreakRemainingMs(now) {
-    if (state.breakTimer.status !== "running") {
-      return Math.max(0, state.breakTimer.remainingMs || state.breakTimer.totalMs || 0);
-    }
-
-    const elapsed = now - (state.breakTimer.lastStartedAt || now);
-    return Math.max(0, (state.breakTimer.remainingMs || state.breakTimer.totalMs || 0) - elapsed);
-  }
-
-  function updateBreakCompletion(now) {
-    if (state.breakTimer.status === "running" && getBreakRemainingMs(now) <= 0) {
-      state.breakTimer.remainingMs = 0;
-      state.breakTimer.status = "completed";
-      state.breakTimer.completedAt = now;
-      state.breakTimer.lastStartedAt = null;
-      persist();
-    }
-  }
-
-  function renderBreak(now, plan) {
-    const timer = state.breakTimer;
-    const remaining = getBreakRemainingMs(now);
-    const total = Math.max(1, timer.totalMs || plan.minutes * 60000);
-    const progress = clamp(1 - remaining / total, 0, 1);
-    const label = timer.status === "idle" ? "Recommended" : capitalize(timer.type) + " break";
-
-    dom.breakState.textContent = timer.status === "running" ? "Break running" : timer.status === "paused" ? "Break paused" : timer.status === "ready" ? "Break ready" : timer.status === "completed" ? "Break done" : "Break idle";
-    dom.breakDisplay.textContent = formatCountdown(timer.status === "idle" ? plan.minutes * 60000 : remaining);
-    dom.breakProgressBar.style.width = Math.round(progress * 100) + "%";
-    dom.breakAdvice.textContent = label + ": " + (timer.status === "idle" ? plan.minutes : timer.minutes) + "m. " + (timer.status === "completed" ? "Recovery complete." : timer.reason || plan.reason);
-    dom.startBreakButton.disabled = timer.status === "running" || timer.status === "paused";
-    dom.startBreakButton.textContent = timer.status === "ready" ? "Start break" : "Start suggested";
-    dom.pauseBreakButton.disabled = !(timer.status === "running" || timer.status === "paused");
-    dom.pauseBreakButton.textContent = timer.status === "paused" ? "Resume" : "Pause";
-    dom.skipBreakButton.disabled = timer.status === "idle";
-  }
-
-  function capitalize(value) {
-    return String(value || "").charAt(0).toUpperCase() + String(value || "").slice(1);
+  function getTodayActiveMs(now) {
+    const sessionsForToday = getSessionsWithCurrentTimer(now);
+    const today = FocusModel.summarizeToday(sessionsForToday, now);
+    const trackedActiveMs = today.activeMs || today.totalActiveMs || 0;
+    return trackedActiveMs + getManualMinutesForDay(now) * 60000;
   }
 
   function recentSessions(limit) {
@@ -864,11 +1273,15 @@
   }
 
   function timerLabel() {
+    const mode = state.timer.mode === "break" ? "Break" : "Focus";
     if (state.timer.status === "running") {
-      return "Running";
+      return mode + " running";
     }
     if (state.timer.status === "paused") {
-      return "Paused";
+      return mode + " paused";
+    }
+    if (state.timer.status === "complete") {
+      return mode + " complete";
     }
     return "Idle";
   }
@@ -968,6 +1381,14 @@
     return `${hours.toFixed(2).replace(/0$/, "")}h`;
   }
 
+  function formatPlanMinutes(minutes) {
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      return "0m";
+    }
+
+    return formatShortDuration(minutes * 60000);
+  }
+
   function formatDuration(ms) {
     return formatShortDuration(ms);
   }
@@ -978,6 +1399,24 @@
       return scoring;
     }
     return Number(scoring?.score) || 0;
+  }
+
+  function getThemeColors() {
+    const styles = window.getComputedStyle(document.documentElement);
+    return {
+      canvasBg: readCssVar(styles, "--canvas-bg"),
+      canvasLine: readCssVar(styles, "--canvas-line"),
+      chartShadow: readCssVar(styles, "--chart-shadow"),
+      green: readCssVar(styles, "--green"),
+      blue: readCssVar(styles, "--blue"),
+      coral: readCssVar(styles, "--coral"),
+      muted: readCssVar(styles, "--muted"),
+      ink: readCssVar(styles, "--ink")
+    };
+  }
+
+  function readCssVar(styles, name) {
+    return styles.getPropertyValue(name).trim();
   }
 
   function roundedRect(context, x, y, width, height, radius) {
