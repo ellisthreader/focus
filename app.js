@@ -1,5 +1,7 @@
 (function () {
   const STORAGE_KEY = "focus-pattern-tracker:v1";
+  const CLOUD_SYNC_KEY = "focus-pattern-tracker:cloud-sync:v1";
+  const CLOUD_SYNC_TABLE = "focus_user_sync_documents";
   const RING_LENGTH = 678.58;
   const THEME_VALUES = ["light", "dark"];
   const DEFAULT_SETTINGS = {
@@ -77,6 +79,19 @@
   let state = structuredClone(defaultState);
   let model = FocusModel.buildModel(state.sessions, modelSettings());
   let tickHandle = null;
+  let autoImportHandle = null;
+  let syncHandle = null;
+  let syncFolder = "";
+  let syncStatus = "Local only";
+  let syncBusy = false;
+  let syncWriteHandle = null;
+  let cloudSyncHandle = null;
+  let cloudWriteHandle = null;
+  let cloudSyncConfig = createEmptyCloudSyncConfig();
+  let cloudSyncStatus = "Cloud off";
+  let cloudSyncBusy = false;
+  let lastCloudSignature = "";
+  let lastSyncSignature = "";
   let alarmContext = null;
   let alarmRepeatHandle = null;
 
@@ -85,11 +100,19 @@
   async function init() {
     bindDom();
     bindEvents();
+    await hydrateSyncConfig();
+    hydrateCloudSyncConfig();
     await hydrateState();
+    await syncCloudData();
+    await syncData();
+    await autoImportData();
     hydrateControls();
     applyTheme(state.theme);
     render();
     tickHandle = window.setInterval(render, 1000);
+    autoImportHandle = window.setInterval(autoImportData, 10000);
+    syncHandle = window.setInterval(syncData, 10000);
+    cloudSyncHandle = window.setInterval(syncCloudData, 15000);
   }
 
   function bindDom() {
@@ -149,6 +172,21 @@
       "dailyPlanNextBlock",
       "dailyPlanTotal",
       "clearHistoryButton",
+      "importDataButton",
+      "exportDataButton",
+      "syncStatusText",
+      "chooseSyncFolderButton",
+      "clearSyncFolderButton",
+      "cloudSyncStatusText",
+      "cloudSyncUrlInput",
+      "cloudSyncKeyInput",
+      "cloudSyncEmailInput",
+      "cloudSyncCodeInput",
+      "cloudSyncIdInput",
+      "sendCloudCodeButton",
+      "verifyCloudCodeButton",
+      "syncCloudNowButton",
+      "clearCloudSyncButton",
       "completionOverlay",
       "completionEyebrow",
       "completionTitle",
@@ -181,6 +219,20 @@
       event.stopPropagation();
       clearHistory();
     });
+    dom.importDataButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      importData();
+    });
+    dom.exportDataButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      exportData();
+    });
+    dom.chooseSyncFolderButton.addEventListener("click", chooseSyncFolder);
+    dom.clearSyncFolderButton.addEventListener("click", clearSyncFolder);
+    dom.sendCloudCodeButton.addEventListener("click", sendCloudLoginCode);
+    dom.verifyCloudCodeButton.addEventListener("click", verifyCloudLoginCode);
+    dom.syncCloudNowButton.addEventListener("click", () => syncCloudData({ force: true }));
+    dom.clearCloudSyncButton.addEventListener("click", clearCloudSyncSettings);
 
     dom.dailyGoalInput.addEventListener("input", () => {
       state.settings.dailyGoalMinutes = Math.round(Number(dom.dailyGoalInput.value) * 60);
@@ -212,6 +264,21 @@
       persist(true);
       if (tickHandle) {
         window.clearInterval(tickHandle);
+      }
+      if (autoImportHandle) {
+        window.clearInterval(autoImportHandle);
+      }
+      if (syncHandle) {
+        window.clearInterval(syncHandle);
+      }
+      if (syncWriteHandle) {
+        window.clearTimeout(syncWriteHandle);
+      }
+      if (cloudSyncHandle) {
+        window.clearInterval(cloudSyncHandle);
+      }
+      if (cloudWriteHandle) {
+        window.clearTimeout(cloudWriteHandle);
       }
     });
   }
@@ -566,6 +633,643 @@
     persistAndRender();
   }
 
+  async function exportData() {
+    if (!window.focusDesktop?.exportData) {
+      window.alert("Export is only available in the desktop app.");
+      return;
+    }
+
+    try {
+      setTransferButtonsDisabled(true);
+      const result = await window.focusDesktop.exportData(structuredClone(state));
+      if (!result || result.canceled) {
+        return;
+      }
+      if (result.ok === false) {
+        window.alert("Could not export focus data: " + (result.error || "Unknown error"));
+        return;
+      }
+      window.alert("Focus data exported to:\n" + result.path);
+    } catch (error) {
+      window.alert("Could not export focus data: " + error.message);
+    } finally {
+      setTransferButtonsDisabled(false);
+    }
+  }
+
+  async function importData() {
+    if (!window.focusDesktop?.importData) {
+      window.alert("Import is only available in the desktop app.");
+      return;
+    }
+
+    try {
+      setTransferButtonsDisabled(true);
+      const result = await window.focusDesktop.importData();
+      if (!result || result.canceled) {
+        return;
+      }
+      if (result.ok === false || !result.state) {
+        window.alert("Could not import focus data: " + (result.error || "No saved state found in that file"));
+        return;
+      }
+
+      const importedState = normalizeState(result.state);
+      const merge = mergeImportedState(state, importedState);
+      if (!merge.addedSessions && !merge.addedGoals && !merge.updatedManualDays) {
+        window.alert("No new focus data found in that backup.");
+        return;
+      }
+
+      state = merge.state;
+      rebuildModel();
+      hydrateControls();
+      persistAndRender();
+      window.alert("Imported " + merge.addedSessions + " sessions, " + merge.addedGoals + " goals, and " + merge.updatedManualDays + " manual day entries.");
+    } catch (error) {
+      window.alert("Could not import focus data: " + error.message);
+    } finally {
+      setTransferButtonsDisabled(false);
+    }
+  }
+
+  async function autoImportData() {
+    if (!window.focusDesktop?.autoImportData) {
+      return;
+    }
+
+    try {
+      const result = await window.focusDesktop.autoImportData();
+      if (result?.ok === false) {
+        console.warn("Unable to auto-import focus data", result.error);
+        return;
+      }
+
+      let nextState = state;
+      let addedSessions = 0;
+      let addedGoals = 0;
+      let updatedManualDays = 0;
+
+      (result?.imports || []).forEach((item) => {
+        const merge = mergeImportedState(nextState, normalizeState(item.state));
+        nextState = merge.state;
+        addedSessions += merge.addedSessions;
+        addedGoals += merge.addedGoals;
+        updatedManualDays += merge.updatedManualDays;
+      });
+
+      if (addedSessions || addedGoals || updatedManualDays) {
+        state = nextState;
+        rebuildModel();
+        persist(true);
+        console.info("Auto-imported focus data", { addedSessions, addedGoals, updatedManualDays });
+      }
+    } catch (error) {
+      console.warn("Unable to auto-import focus data", error);
+    }
+  }
+
+  function createEmptyCloudSyncConfig() {
+    return { url: "", anonKey: "", email: "", accessToken: "", refreshToken: "", userId: "", syncId: "" };
+  }
+
+  function hydrateCloudSyncConfig() {
+    cloudSyncConfig = loadCloudSyncConfig();
+    cloudSyncStatus = isCloudSyncConfigured() ? "Cloud ready" : "Cloud off";
+    syncCloudInputs();
+  }
+
+  function loadCloudSyncConfig() {
+    try {
+      const raw = window.localStorage.getItem(CLOUD_SYNC_KEY);
+      if (!raw) {
+        return createEmptyCloudSyncConfig();
+      }
+
+      const parsed = JSON.parse(raw);
+      return {
+        url: normalizeCloudUrl(parsed.url),
+        anonKey: String(parsed.anonKey || "").trim(),
+        email: normalizeEmail(parsed.email),
+        accessToken: String(parsed.accessToken || ""),
+        refreshToken: String(parsed.refreshToken || ""),
+        userId: String(parsed.userId || ""),
+        syncId: normalizeSyncId(parsed.syncId)
+      };
+    } catch (error) {
+      console.warn("Unable to load cloud sync config", error);
+      return createEmptyCloudSyncConfig();
+    }
+  }
+
+  function persistCloudSyncConfig() {
+    window.localStorage.setItem(CLOUD_SYNC_KEY, JSON.stringify(cloudSyncConfig));
+  }
+
+  function syncCloudInputs() {
+    if (!dom.cloudSyncUrlInput) {
+      return;
+    }
+
+    dom.cloudSyncUrlInput.value = cloudSyncConfig.url || "";
+    dom.cloudSyncKeyInput.value = cloudSyncConfig.anonKey || "";
+    if (dom.cloudSyncEmailInput) {
+      dom.cloudSyncEmailInput.value = cloudSyncConfig.email || "";
+    }
+    if (dom.cloudSyncIdInput) {
+      dom.cloudSyncIdInput.value = cloudSyncConfig.syncId || "";
+    }
+    if (dom.cloudSyncCodeInput) {
+      dom.cloudSyncCodeInput.value = "";
+    }
+    updateCloudSyncStatus();
+  }
+
+  async function sendCloudLoginCode() {
+    cloudSyncConfig = {
+      ...cloudSyncConfig,
+      url: normalizeCloudUrl(dom.cloudSyncUrlInput.value),
+      anonKey: String(dom.cloudSyncKeyInput.value || "").trim(),
+      email: normalizeEmail(dom.cloudSyncEmailInput.value)
+    };
+
+    if (!cloudSyncConfig.url || !cloudSyncConfig.anonKey || !cloudSyncConfig.email) {
+      window.alert("Cloud sign in needs a Supabase URL, anon key, and email.");
+      return;
+    }
+
+    try {
+      cloudSyncStatus = "Sending code";
+      updateCloudSyncStatus();
+      const response = await fetch(cloudSyncConfig.url + "/auth/v1/otp", {
+        method: "POST",
+        headers: {
+          apikey: cloudSyncConfig.anonKey,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ email: cloudSyncConfig.email, create_user: true })
+      });
+
+      if (!response.ok) {
+        throw new Error("Code request failed: " + response.status);
+      }
+
+      persistCloudSyncConfig();
+      cloudSyncStatus = "Code sent";
+      updateCloudSyncStatus();
+    } catch (error) {
+      cloudSyncStatus = "Cloud error";
+      updateCloudSyncStatus();
+      window.alert("Could not send login code: " + error.message);
+    }
+  }
+
+  async function verifyCloudLoginCode() {
+    cloudSyncConfig = {
+      ...cloudSyncConfig,
+      url: normalizeCloudUrl(dom.cloudSyncUrlInput.value),
+      anonKey: String(dom.cloudSyncKeyInput.value || "").trim(),
+      email: normalizeEmail(dom.cloudSyncEmailInput.value)
+    };
+    const token = String(dom.cloudSyncCodeInput.value || "").trim();
+
+    if (!cloudSyncConfig.url || !cloudSyncConfig.anonKey || !cloudSyncConfig.email || !token) {
+      window.alert("Enter the Supabase details, email, and login code.");
+      return;
+    }
+
+    try {
+      cloudSyncStatus = "Signing in";
+      updateCloudSyncStatus();
+      const response = await fetch(cloudSyncConfig.url + "/auth/v1/verify", {
+        method: "POST",
+        headers: {
+          apikey: cloudSyncConfig.anonKey,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ email: cloudSyncConfig.email, token, type: "email" })
+      });
+
+      if (!response.ok) {
+        throw new Error("Sign in failed: " + response.status);
+      }
+
+      const payload = await response.json();
+      cloudSyncConfig = {
+        ...cloudSyncConfig,
+        accessToken: payload.access_token || "",
+        refreshToken: payload.refresh_token || "",
+        userId: payload.user?.id || "",
+        syncId: payload.user?.id || cloudSyncConfig.syncId || generateSyncIdValue()
+      };
+
+      if (!cloudSyncConfig.accessToken || !cloudSyncConfig.userId) {
+        throw new Error("Supabase did not return a session.");
+      }
+
+      persistCloudSyncConfig();
+      cloudSyncStatus = "Signed in";
+      syncCloudInputs();
+      await syncCloudData({ force: true });
+      render();
+    } catch (error) {
+      cloudSyncStatus = "Cloud error";
+      updateCloudSyncStatus();
+      window.alert("Could not sign in: " + error.message);
+    }
+  }
+
+  function clearCloudSyncSettings() {
+    cloudSyncConfig = createEmptyCloudSyncConfig();
+    lastCloudSignature = "";
+    cloudSyncStatus = "Cloud off";
+    try {
+      window.localStorage.removeItem(CLOUD_SYNC_KEY);
+    } catch (error) {
+      console.warn("Unable to clear cloud sync config", error);
+    }
+    syncCloudInputs();
+  }
+
+  async function syncCloudData(options = {}) {
+    if (cloudSyncBusy || !isCloudSyncConfigured()) {
+      updateCloudSyncStatus();
+      return;
+    }
+
+    cloudSyncBusy = true;
+    cloudSyncStatus = "Cloud syncing";
+    updateCloudSyncStatus();
+
+    try {
+      const remoteState = await readCloudState();
+      let changed = false;
+      if (remoteState) {
+        const merge = mergeImportedState(state, normalizeState(remoteState));
+        if (merge.addedSessions || merge.addedGoals || merge.updatedManualDays) {
+          state = merge.state;
+          changed = true;
+          rebuildModel();
+        }
+      }
+
+      const snapshot = createSyncSnapshot();
+      const signature = snapshotSignature(snapshot);
+      if (options.force || changed || signature !== lastCloudSignature || !remoteState) {
+        await writeCloudState(snapshot);
+        lastCloudSignature = signature;
+      }
+
+      if (changed) {
+        persist(true);
+        hydrateControls();
+        render();
+      }
+
+      cloudSyncStatus = "Cloud synced";
+    } catch (error) {
+      cloudSyncStatus = "Cloud error";
+      console.warn("Unable to sync cloud data", error);
+    } finally {
+      cloudSyncBusy = false;
+      updateCloudSyncStatus();
+    }
+  }
+
+  async function readCloudState() {
+    const url = cloudApiUrl() + "?user_id=eq." + encodeURIComponent(cloudSyncConfig.userId) + "&select=payload";
+    const response = await fetch(url, { headers: cloudHeaders() });
+    if (!response.ok) {
+      throw new Error("Cloud read failed: " + response.status);
+    }
+
+    const rows = await response.json();
+    const payload = Array.isArray(rows) && rows[0] ? rows[0].payload : null;
+    return payload && typeof payload === "object" && "state" in payload ? payload.state : payload;
+  }
+
+  async function writeCloudState(snapshot) {
+    const response = await fetch(cloudApiUrl(), {
+      method: "POST",
+      headers: {
+        ...cloudHeaders(),
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates"
+      },
+      body: JSON.stringify({
+        user_id: cloudSyncConfig.userId,
+        payload: { version: 1, updatedAt: new Date().toISOString(), state: snapshot },
+        updated_at: new Date().toISOString()
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error("Cloud write failed: " + response.status);
+    }
+  }
+
+  function queueCloudSyncWrite() {
+    if (!isCloudSyncConfigured() || cloudSyncBusy) {
+      return;
+    }
+
+    cloudSyncStatus = "Cloud syncing";
+    updateCloudSyncStatus();
+    if (cloudWriteHandle) {
+      window.clearTimeout(cloudWriteHandle);
+    }
+
+    cloudWriteHandle = window.setTimeout(() => {
+      cloudWriteHandle = null;
+      syncCloudData();
+    }, 500);
+  }
+
+  function isCloudSyncConfigured() {
+    return Boolean(cloudSyncConfig.url && cloudSyncConfig.anonKey && cloudSyncConfig.accessToken && cloudSyncConfig.userId);
+  }
+
+  function cloudApiUrl() {
+    return cloudSyncConfig.url + "/rest/v1/" + CLOUD_SYNC_TABLE;
+  }
+
+  function cloudHeaders() {
+    return {
+      apikey: cloudSyncConfig.anonKey,
+      Authorization: "Bearer " + cloudSyncConfig.accessToken
+    };
+  }
+
+  function normalizeCloudUrl(value) {
+    return String(value || "").trim().replace(/\/+$/, "");
+  }
+
+  function normalizeEmail(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function normalizeSyncId(value) {
+    return String(value || "").trim().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
+  }
+
+  function generateSyncIdValue() {
+    if (window.crypto?.randomUUID) {
+      return "focus-" + window.crypto.randomUUID();
+    }
+
+    return "focus-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+  }
+
+  function updateCloudSyncStatus() {
+    if (!dom.cloudSyncStatusText) {
+      return;
+    }
+
+    dom.cloudSyncStatusText.textContent = isCloudSyncConfigured() ? cloudSyncStatus : "Off";
+    dom.syncCloudNowButton.disabled = !isCloudSyncConfigured();
+    dom.clearCloudSyncButton.disabled = !isCloudSyncConfigured();
+  }
+
+  function cloudSyncSummary() {
+    return isCloudSyncConfigured() ? " + cloud sync" : "";
+  }
+
+  async function hydrateSyncConfig() {
+    if (!window.focusDesktop?.getSyncConfig) {
+      syncFolder = "";
+      syncStatus = "Local only";
+      return;
+    }
+
+    try {
+      const result = await window.focusDesktop.getSyncConfig();
+      syncFolder = result?.folder || "";
+      syncStatus = syncFolder ? "Sync ready" : "Local only";
+    } catch (error) {
+      syncFolder = "";
+      syncStatus = "Sync unavailable";
+      console.warn("Unable to load sync config", error);
+    }
+  }
+
+  async function chooseSyncFolder() {
+    if (!window.focusDesktop?.chooseSyncFolder) {
+      window.alert("Folder sync is only available in the desktop app.");
+      return;
+    }
+
+    const result = await window.focusDesktop.chooseSyncFolder();
+    if (!result || result.canceled) {
+      return;
+    }
+    if (result.ok === false) {
+      window.alert("Could not set sync folder: " + (result.error || "Unknown error"));
+      return;
+    }
+
+    syncFolder = result.folder || "";
+    syncStatus = syncFolder ? "Sync ready" : "Local only";
+    updateSyncStatus();
+    await syncData();
+    render();
+  }
+
+  async function clearSyncFolder() {
+    if (!window.focusDesktop?.clearSyncFolder) {
+      return;
+    }
+
+    const result = await window.focusDesktop.clearSyncFolder();
+    if (result?.ok === false) {
+      window.alert("Could not clear sync folder: " + (result.error || "Unknown error"));
+      return;
+    }
+
+    syncFolder = "";
+    syncStatus = "Local only";
+    lastSyncSignature = "";
+    updateSyncStatus();
+    render();
+  }
+
+  async function syncData() {
+    if (syncBusy || !syncFolder || !window.focusDesktop?.readSyncData || !window.focusDesktop?.writeSyncData) {
+      updateSyncStatus();
+      return;
+    }
+
+    syncBusy = true;
+    try {
+      const result = await window.focusDesktop.readSyncData();
+      if (result?.ok === false) {
+        syncStatus = "Sync error";
+        console.warn("Unable to read sync data", result.error);
+        return;
+      }
+
+      let changed = false;
+      if (result?.state) {
+        const merge = mergeImportedState(state, normalizeState(result.state));
+        if (merge.addedSessions || merge.addedGoals || merge.updatedManualDays) {
+          state = merge.state;
+          changed = true;
+          rebuildModel();
+        }
+      }
+
+      const snapshot = createSyncSnapshot();
+      const signature = snapshotSignature(snapshot);
+      if (changed || signature !== lastSyncSignature || !result?.state) {
+        const writeResult = await window.focusDesktop.writeSyncData(snapshot);
+        if (writeResult?.ok === false) {
+          syncStatus = "Sync error";
+          console.warn("Unable to write sync data", writeResult.error);
+          return;
+        }
+        lastSyncSignature = signature;
+      }
+
+      if (changed) {
+        persist(true);
+        hydrateControls();
+        render();
+      }
+
+      syncStatus = "Synced";
+    } catch (error) {
+      syncStatus = "Sync error";
+      console.warn("Unable to sync focus data", error);
+    } finally {
+      syncBusy = false;
+      updateSyncStatus();
+    }
+  }
+
+  function queueSyncWrite() {
+    if (!syncFolder || syncBusy || !window.focusDesktop?.readSyncData || !window.focusDesktop?.writeSyncData) {
+      return;
+    }
+
+    syncStatus = "Syncing";
+    updateSyncStatus();
+    if (syncWriteHandle) {
+      window.clearTimeout(syncWriteHandle);
+    }
+
+    syncWriteHandle = window.setTimeout(() => {
+      syncWriteHandle = null;
+      syncData();
+    }, 350);
+  }
+
+  function createSyncSnapshot(source = state) {
+    return {
+      ...structuredClone(source),
+      timer: createIdleTimer()
+    };
+  }
+
+  function snapshotSignature(snapshot) {
+    return JSON.stringify({
+      sessions: snapshot.sessions || [],
+      manualDailyMinutes: snapshot.manualDailyMinutes || {},
+      goals: snapshot.goals || [],
+      settings: snapshot.settings || {}
+    });
+  }
+
+  function updateSyncStatus() {
+    if (!dom.syncStatusText) {
+      return;
+    }
+
+    dom.syncStatusText.textContent = syncFolder ? syncStatus : "Local only";
+    dom.syncStatusText.title = syncFolder || "No sync folder selected";
+    if (dom.clearSyncFolderButton) {
+      dom.clearSyncFolderButton.disabled = !syncFolder;
+    }
+  }
+
+  function syncSummary() {
+    return syncFolder ? " + synced folder" : "";
+  }
+
+  function mergeImportedState(currentState, importedState) {
+    const merged = structuredClone(currentState);
+    const sessions = new Map();
+    normalizeSessions(currentState.sessions).forEach((session) => {
+      sessions.set(sessionKey(session), session);
+    });
+
+    let addedSessions = 0;
+    normalizeSessions(importedState.sessions).forEach((session) => {
+      const key = sessionKey(session);
+      if (!sessions.has(key)) {
+        sessions.set(key, session);
+        addedSessions += 1;
+      }
+    });
+
+    merged.sessions = Array.from(sessions.values())
+      .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0))
+      .slice(-600);
+
+    const goals = new Map();
+    normalizeGoals(currentState.goals).forEach((goal) => {
+      goals.set(goalKey(goal), goal);
+    });
+
+    let addedGoals = 0;
+    normalizeGoals(importedState.goals).forEach((goal) => {
+      const key = goalKey(goal);
+      if (!goals.has(key)) {
+        goals.set(key, goal);
+        addedGoals += 1;
+      }
+    });
+
+    merged.goals = Array.from(goals.values()).slice(-80);
+    merged.manualDailyMinutes = { ...normalizeManualDailyMinutes(currentState.manualDailyMinutes) };
+
+    let updatedManualDays = 0;
+    Object.entries(normalizeManualDailyMinutes(importedState.manualDailyMinutes)).forEach(([key, minutes]) => {
+      const currentMinutes = Number(merged.manualDailyMinutes[key]) || 0;
+      if (minutes > currentMinutes) {
+        merged.manualDailyMinutes[key] = minutes;
+        updatedManualDays += 1;
+      }
+    });
+
+    return { state: merged, addedSessions, addedGoals, updatedManualDays };
+  }
+
+  function sessionKey(session) {
+    if (session.id) {
+      return "id:" + session.id;
+    }
+
+    return [
+      session.startedAt,
+      session.endedAt,
+      session.title,
+      session.project,
+      session.activeMs
+    ].join("|");
+  }
+
+  function goalKey(goal) {
+    return String(goal.text || "").trim().toLowerCase() + "|" + String(goal.createdAt || "");
+  }
+
+  function setTransferButtonsDisabled(disabled) {
+    if (dom.importDataButton) {
+      dom.importDataButton.disabled = disabled;
+    }
+    if (dom.exportDataButton) {
+      dom.exportDataButton.disabled = disabled;
+    }
+  }
+
   function render() {
     const now = Date.now();
     checkTimerCompletion(now);
@@ -628,7 +1332,9 @@
     dom.recommendedBlock.textContent = `${Math.round(dailyPlan.nextBlockMinutes || recommendation || model.suggestedGoalMinutes || state.settings.blockGoalMinutes)}m`;
     dom.bestHours.textContent = model.sessionCount ? formatHours(model.bestHours) : "No history yet";
     dom.riskHours.textContent = model.sessionCount ? formatHours(model.riskHours) : "No history yet";
-    dom.modelStatus.textContent = `${state.sessions.length} sessions saved in local database`;
+    dom.modelStatus.textContent = String(state.sessions.length) + " sessions saved in local database" + syncSummary() + cloudSyncSummary();
+    updateSyncStatus();
+    updateCloudSyncStatus();
 
     drawPatternCanvas();
     renderSessions();
@@ -953,9 +1659,13 @@
       if (result && result.ok === false) {
         console.warn("Unable to save focus tracker database", result.error);
       }
+      queueSyncWrite(snapshot);
+      queueCloudSyncWrite();
       return;
     }
 
+    queueSyncWrite(snapshot);
+    queueCloudSyncWrite();
     window.focusDesktop.saveData(snapshot)
       .then((result) => {
         if (result && result.ok === false) {

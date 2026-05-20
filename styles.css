@@ -890,6 +890,25 @@ input[type="number"]:focus {
   gap: 10px;
 }
 
+.cloud-sync-block,
+.sync-block {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.cloud-sync-actions,
+.sync-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cloud-sync-actions .text-action,
+.sync-actions .text-action {
+  min-height: 34px;
+}
+
 .compact-slider {
   margin: 8px 0 0;
 }
@@ -966,6 +985,13 @@ input[type="number"]:focus {
 
 .details-heading h2 {
   margin: 0;
+}
+
+.history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .details-heading .text-action {
@@ -1061,4 +1087,8 @@ input[type="number"]:focus {
   .ghost-action {
     width: 100%;
   }
+}
+
+.sync-block {
+  display: none;
 }
