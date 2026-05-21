@@ -21,6 +21,38 @@
           </div>
         </div>
         <div class="window-actions">
+          <details class="profile-menu" id="profileMenu">
+            <summary class="profile-trigger" title="Profile">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10z"></path></svg>
+              <span id="profileNameText">Log in</span>
+            </summary>
+            <div class="profile-popover">
+              <div class="slider-label">
+                <span>Account</span>
+                <strong id="cloudSyncStatusText">Off</strong>
+              </div>
+              <label>
+                <span>Username</span>
+                <input id="cloudSyncEmailInput" type="text" maxlength="160" autocomplete="username" placeholder="Choose a username">
+              </label>
+              <label>
+                <span>Password</span>
+                <input id="cloudSyncKeyInput" type="password" maxlength="200" autocomplete="current-password" placeholder="Account password">
+              </label>
+              <input id="cloudSyncUrlInput" type="hidden">
+              <input id="mysqlPortInput" type="hidden">
+              <input id="mysqlDatabaseInput" type="hidden">
+              <input id="mysqlDatabaseUserInput" type="hidden">
+              <input id="cloudSyncCodeInput" type="hidden">
+              <input id="cloudSyncIdInput" type="hidden">
+              <div class="cloud-sync-actions">
+                <button class="secondary-action text-action" id="sendCloudCodeButton" type="button">Create account</button>
+                <button class="primary-action text-action" id="verifyCloudCodeButton" type="button">Log in</button>
+                <button class="secondary-action text-action" id="syncCloudNowButton" type="button">Sync now</button>
+                <button class="ghost-action text-action" id="clearCloudSyncButton" type="button">Log out</button>
+              </div>
+            </div>
+          </details>
           <button class="icon-button theme-toggle" id="themeToggle" type="button" title="Switch to dark mode" aria-label="Switch to dark mode" aria-pressed="false">
             <svg class="theme-icon sun-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4V2M12 22v-2M4.93 4.93 3.52 3.52M20.48 20.48l-1.41-1.41M4 12H2M22 12h-2M4.93 19.07l-1.41 1.41M20.48 3.52l-1.41 1.41M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8z"></path></svg>
             <svg class="theme-icon moon-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.5A7.5 7.5 0 0 1 9.5 3.5 8.5 8.5 0 1 0 20.5 14.5z"></path></svg>
@@ -192,36 +224,7 @@
                       <input id="manualMinutesInput" type="number" min="0" max="59" step="5" value="0">
                     </label>
                   </div>
-                </div>
-
-                <div class="cloud-sync-block">
-                  <div class="slider-label">
-                    <span>Cloud sync</span>
-                    <strong id="cloudSyncStatusText">Off</strong>
-                  </div>
-                  <label>
-                    <span>Supabase URL</span>
-                    <input id="cloudSyncUrlInput" type="text" maxlength="220" placeholder="https://project.supabase.co">
-                  </label>
-                  <label>
-                    <span>Anon key</span>
-                    <input id="cloudSyncKeyInput" type="password" maxlength="900" placeholder="Paste anon public key">
-                  </label>
-                  <label>
-                    <span>Email</span>
-                    <input id="cloudSyncEmailInput" type="email" maxlength="160" placeholder="you@example.com">
-                  </label>
-                  <label>
-                    <span>Login code</span>
-                    <input id="cloudSyncCodeInput" type="text" maxlength="12" placeholder="6 digit code">
-                  </label>
-                  <input id="cloudSyncIdInput" type="hidden">
-                  <div class="cloud-sync-actions">
-                    <button class="secondary-action text-action" id="sendCloudCodeButton" type="button">Send code</button>
-                    <button class="primary-action text-action" id="verifyCloudCodeButton" type="button">Sign in</button>
-                    <button class="secondary-action text-action" id="syncCloudNowButton" type="button">Sync now</button>
-                    <button class="ghost-action text-action" id="clearCloudSyncButton" type="button">Sign out</button>
-                  </div>
+                  <button class="ghost-action text-action manual-clear" id="clearManualCreditButton" type="button">Clear added time</button>
                 </div>
 
                 <div class="sync-block">

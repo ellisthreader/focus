@@ -167,6 +167,99 @@ svg {
   gap: 6px;
 }
 
+.profile-menu {
+  position: relative;
+}
+
+.profile-menu summary {
+  list-style: none;
+}
+
+.profile-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.profile-trigger {
+  height: 32px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.profile-trigger svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.profile-trigger span {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-trigger:hover {
+  background: var(--hover-bg);
+}
+
+.profile-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 20;
+  width: min(320px, calc(100vw - 28px));
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.profile-popover label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.profile-popover input[type="text"],
+.profile-popover input[type="password"] {
+  height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  outline: none;
+  color: var(--ink);
+  background: var(--input-bg);
+  font-size: 14px;
+  font-weight: 750;
+  text-transform: none;
+}
+
+.profile-popover input[type="text"]:focus,
+.profile-popover input[type="password"]:focus {
+  border-color: rgba(36, 107, 254, 0.62);
+  box-shadow: 0 0 0 4px rgba(36, 107, 254, 0.10);
+}
+
 .icon-button {
   width: 34px;
   height: 32px;
@@ -890,6 +983,10 @@ input[type="number"]:focus {
   gap: 10px;
 }
 
+.manual-clear {
+  width: 100%;
+}
+
 .cloud-sync-block,
 .sync-block {
   display: grid;
@@ -902,6 +999,12 @@ input[type="number"]:focus {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.mysql-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  gap: 10px;
 }
 
 .cloud-sync-actions .text-action,
@@ -1080,6 +1183,7 @@ input[type="number"]:focus {
 
   .quick-fields,
   .control-row,
+  .mysql-grid,
   .side-rail {
     grid-template-columns: 1fr;
   }

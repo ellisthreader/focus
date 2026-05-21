@@ -1,7 +1,6 @@
 (function () {
   const STORAGE_KEY = "focus-pattern-tracker:v1";
-  const CLOUD_SYNC_KEY = "focus-pattern-tracker:cloud-sync:v1";
-  const CLOUD_SYNC_TABLE = "focus_user_sync_documents";
+  const CLOUD_SYNC_KEY = "focus-pattern-tracker:mysql-sync:v1";
   const RING_LENGTH = 678.58;
   const THEME_VALUES = ["light", "dark"];
   const DEFAULT_SETTINGS = {
@@ -72,6 +71,7 @@
     sessions: [],
     timer: createIdleTimer(),
     manualDailyMinutes: {},
+    manualDailyUpdatedAt: {},
     goals: []
   };
 
@@ -88,7 +88,7 @@
   let cloudSyncHandle = null;
   let cloudWriteHandle = null;
   let cloudSyncConfig = createEmptyCloudSyncConfig();
-  let cloudSyncStatus = "Cloud off";
+  let cloudSyncStatus = "MySQL off";
   let cloudSyncBusy = false;
   let lastCloudSignature = "";
   let lastSyncSignature = "";
@@ -118,6 +118,7 @@
   function bindDom() {
     [
       "modelStatus",
+      "profileNameText",
       "themeToggle",
       "timerPanel",
       "timerTitle",
@@ -167,6 +168,7 @@
       "sessionList",
       "manualHoursInput",
       "manualMinutesInput",
+      "clearManualCreditButton",
       "manualCreditText",
       "dailyPlanBlocks",
       "dailyPlanNextBlock",
@@ -179,6 +181,9 @@
       "clearSyncFolderButton",
       "cloudSyncStatusText",
       "cloudSyncUrlInput",
+      "mysqlPortInput",
+      "mysqlDatabaseInput",
+      "mysqlDatabaseUserInput",
       "cloudSyncKeyInput",
       "cloudSyncEmailInput",
       "cloudSyncCodeInput",
@@ -250,6 +255,7 @@
     [dom.manualHoursInput, dom.manualMinutesInput].forEach((input) => {
       input.addEventListener("input", updateManualCredit);
     });
+    dom.clearManualCreditButton.addEventListener("click", clearManualCredit);
 
     [dom.taskInput, dom.projectInput, dom.tagsInput, dom.energyInput, dom.focusInput].forEach((input) => {
       input.addEventListener("input", () => {
@@ -730,12 +736,16 @@
   }
 
   function createEmptyCloudSyncConfig() {
-    return { url: "", anonKey: "", email: "", accessToken: "", refreshToken: "", userId: "", syncId: "" };
+    return {
+      username: "",
+      password: "",
+      signedIn: false
+    };
   }
 
   function hydrateCloudSyncConfig() {
     cloudSyncConfig = loadCloudSyncConfig();
-    cloudSyncStatus = isCloudSyncConfigured() ? "Cloud ready" : "Cloud off";
+    cloudSyncStatus = isCloudSyncConfigured() ? "MySQL ready" : "MySQL off";
     syncCloudInputs();
   }
 
@@ -748,22 +758,21 @@
 
       const parsed = JSON.parse(raw);
       return {
-        url: normalizeCloudUrl(parsed.url),
-        anonKey: String(parsed.anonKey || "").trim(),
-        email: normalizeEmail(parsed.email),
-        accessToken: String(parsed.accessToken || ""),
-        refreshToken: String(parsed.refreshToken || ""),
-        userId: String(parsed.userId || ""),
-        syncId: normalizeSyncId(parsed.syncId)
+        username: normalizeMysqlUsername(parsed.username || parsed.profileName || parsed.email),
+        password: "",
+        signedIn: false
       };
     } catch (error) {
-      console.warn("Unable to load cloud sync config", error);
+      console.warn("Unable to load MySQL sync config", error);
       return createEmptyCloudSyncConfig();
     }
   }
 
   function persistCloudSyncConfig() {
-    window.localStorage.setItem(CLOUD_SYNC_KEY, JSON.stringify(cloudSyncConfig));
+    window.localStorage.setItem(CLOUD_SYNC_KEY, JSON.stringify({
+      username: cloudSyncConfig.username || "",
+      signedIn: false
+    }));
   }
 
   function syncCloudInputs() {
@@ -771,13 +780,14 @@
       return;
     }
 
-    dom.cloudSyncUrlInput.value = cloudSyncConfig.url || "";
-    dom.cloudSyncKeyInput.value = cloudSyncConfig.anonKey || "";
     if (dom.cloudSyncEmailInput) {
-      dom.cloudSyncEmailInput.value = cloudSyncConfig.email || "";
+      dom.cloudSyncEmailInput.value = cloudSyncConfig.username || "";
+    }
+    if (dom.cloudSyncKeyInput && !cloudSyncConfig.signedIn) {
+      dom.cloudSyncKeyInput.value = "";
     }
     if (dom.cloudSyncIdInput) {
-      dom.cloudSyncIdInput.value = cloudSyncConfig.syncId || "";
+      dom.cloudSyncIdInput.value = "";
     }
     if (dom.cloudSyncCodeInput) {
       dom.cloudSyncCodeInput.value = "";
@@ -786,107 +796,78 @@
   }
 
   async function sendCloudLoginCode() {
-    cloudSyncConfig = {
-      ...cloudSyncConfig,
-      url: normalizeCloudUrl(dom.cloudSyncUrlInput.value),
-      anonKey: String(dom.cloudSyncKeyInput.value || "").trim(),
-      email: normalizeEmail(dom.cloudSyncEmailInput.value)
-    };
+    cloudSyncConfig = readMysqlConfigFromInputs({ signedIn: false });
 
-    if (!cloudSyncConfig.url || !cloudSyncConfig.anonKey || !cloudSyncConfig.email) {
-      window.alert("Cloud sign in needs a Supabase URL, anon key, and email.");
+    if (!window.focusDesktop?.createMysqlAccount) {
+      window.alert("Account creation is only available in the desktop app.");
       return;
     }
 
     try {
-      cloudSyncStatus = "Sending code";
+      cloudSyncStatus = "Creating";
       updateCloudSyncStatus();
-      const response = await fetch(cloudSyncConfig.url + "/auth/v1/otp", {
-        method: "POST",
-        headers: {
-          apikey: cloudSyncConfig.anonKey,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ email: cloudSyncConfig.email, create_user: true })
-      });
 
-      if (!response.ok) {
-        throw new Error("Code request failed: " + response.status);
+      const result = await window.focusDesktop.createMysqlAccount(cloudSyncConfig, createSyncSnapshot());
+      if (!result || result.ok === false) {
+        throw new Error(result?.error || "Account creation failed.");
       }
 
+      cloudSyncConfig = { ...cloudSyncConfig, signedIn: true };
       persistCloudSyncConfig();
-      cloudSyncStatus = "Code sent";
-      updateCloudSyncStatus();
+      cloudSyncStatus = "Account created";
+      syncCloudInputs();
+      render();
     } catch (error) {
-      cloudSyncStatus = "Cloud error";
+      cloudSyncStatus = "Account error";
       updateCloudSyncStatus();
-      window.alert("Could not send login code: " + error.message);
+      window.alert("Could not create account: " + error.message);
     }
   }
 
   async function verifyCloudLoginCode() {
-    cloudSyncConfig = {
-      ...cloudSyncConfig,
-      url: normalizeCloudUrl(dom.cloudSyncUrlInput.value),
-      anonKey: String(dom.cloudSyncKeyInput.value || "").trim(),
-      email: normalizeEmail(dom.cloudSyncEmailInput.value)
-    };
-    const token = String(dom.cloudSyncCodeInput.value || "").trim();
+    cloudSyncConfig = readMysqlConfigFromInputs({ signedIn: false });
 
-    if (!cloudSyncConfig.url || !cloudSyncConfig.anonKey || !cloudSyncConfig.email || !token) {
-      window.alert("Enter the Supabase details, email, and login code.");
+    if (!window.focusDesktop?.loginMysqlUser) {
+      window.alert("MySQL login is only available in the desktop app.");
       return;
     }
 
     try {
-      cloudSyncStatus = "Signing in";
+      cloudSyncStatus = "Logging in";
       updateCloudSyncStatus();
-      const response = await fetch(cloudSyncConfig.url + "/auth/v1/verify", {
-        method: "POST",
-        headers: {
-          apikey: cloudSyncConfig.anonKey,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ email: cloudSyncConfig.email, token, type: "email" })
-      });
 
-      if (!response.ok) {
-        throw new Error("Sign in failed: " + response.status);
+      const result = await window.focusDesktop.loginMysqlUser(cloudSyncConfig);
+      if (!result || result.ok === false) {
+        throw new Error(result?.error || "Login failed.");
       }
 
-      const payload = await response.json();
-      cloudSyncConfig = {
-        ...cloudSyncConfig,
-        accessToken: payload.access_token || "",
-        refreshToken: payload.refresh_token || "",
-        userId: payload.user?.id || "",
-        syncId: payload.user?.id || cloudSyncConfig.syncId || generateSyncIdValue()
-      };
-
-      if (!cloudSyncConfig.accessToken || !cloudSyncConfig.userId) {
-        throw new Error("Supabase did not return a session.");
-      }
-
+      cloudSyncConfig = { ...cloudSyncConfig, signedIn: true };
       persistCloudSyncConfig();
-      cloudSyncStatus = "Signed in";
+      if (result.state) {
+        state = normalizeState(result.state);
+        rebuildModel();
+        persist(true);
+        hydrateControls();
+      }
+
+      cloudSyncStatus = "Logged in";
       syncCloudInputs();
-      await syncCloudData({ force: true });
       render();
     } catch (error) {
-      cloudSyncStatus = "Cloud error";
+      cloudSyncStatus = "Login error";
       updateCloudSyncStatus();
-      window.alert("Could not sign in: " + error.message);
+      window.alert("Could not log in: " + error.message);
     }
   }
 
   function clearCloudSyncSettings() {
     cloudSyncConfig = createEmptyCloudSyncConfig();
     lastCloudSignature = "";
-    cloudSyncStatus = "Cloud off";
+    cloudSyncStatus = "MySQL off";
     try {
       window.localStorage.removeItem(CLOUD_SYNC_KEY);
     } catch (error) {
-      console.warn("Unable to clear cloud sync config", error);
+      console.warn("Unable to clear MySQL sync config", error);
     }
     syncCloudInputs();
   }
@@ -898,7 +879,7 @@
     }
 
     cloudSyncBusy = true;
-    cloudSyncStatus = "Cloud syncing";
+    cloudSyncStatus = "MySQL syncing";
     updateCloudSyncStatus();
 
     try {
@@ -926,10 +907,10 @@
         render();
       }
 
-      cloudSyncStatus = "Cloud synced";
+      cloudSyncStatus = "MySQL synced";
     } catch (error) {
-      cloudSyncStatus = "Cloud error";
-      console.warn("Unable to sync cloud data", error);
+      cloudSyncStatus = "MySQL error";
+      console.warn("Unable to sync MySQL data", error);
     } finally {
       cloudSyncBusy = false;
       updateCloudSyncStatus();
@@ -937,34 +918,18 @@
   }
 
   async function readCloudState() {
-    const url = cloudApiUrl() + "?user_id=eq." + encodeURIComponent(cloudSyncConfig.userId) + "&select=payload";
-    const response = await fetch(url, { headers: cloudHeaders() });
-    if (!response.ok) {
-      throw new Error("Cloud read failed: " + response.status);
+    const result = await window.focusDesktop.readMysqlUserState(cloudSyncConfig);
+    if (!result || result.ok === false) {
+      throw new Error(result?.error || "MySQL read failed.");
     }
 
-    const rows = await response.json();
-    const payload = Array.isArray(rows) && rows[0] ? rows[0].payload : null;
-    return payload && typeof payload === "object" && "state" in payload ? payload.state : payload;
+    return result.state || null;
   }
 
   async function writeCloudState(snapshot) {
-    const response = await fetch(cloudApiUrl(), {
-      method: "POST",
-      headers: {
-        ...cloudHeaders(),
-        "Content-Type": "application/json",
-        Prefer: "resolution=merge-duplicates"
-      },
-      body: JSON.stringify({
-        user_id: cloudSyncConfig.userId,
-        payload: { version: 1, updatedAt: new Date().toISOString(), state: snapshot },
-        updated_at: new Date().toISOString()
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error("Cloud write failed: " + response.status);
+    const result = await window.focusDesktop.writeMysqlUserState(cloudSyncConfig, snapshot);
+    if (!result || result.ok === false) {
+      throw new Error(result?.error || "MySQL write failed.");
     }
   }
 
@@ -973,7 +938,7 @@
       return;
     }
 
-    cloudSyncStatus = "Cloud syncing";
+    cloudSyncStatus = "MySQL syncing";
     updateCloudSyncStatus();
     if (cloudWriteHandle) {
       window.clearTimeout(cloudWriteHandle);
@@ -986,38 +951,17 @@
   }
 
   function isCloudSyncConfigured() {
-    return Boolean(cloudSyncConfig.url && cloudSyncConfig.anonKey && cloudSyncConfig.accessToken && cloudSyncConfig.userId);
+    return Boolean(
+      cloudSyncConfig.signedIn &&
+        cloudSyncConfig.username &&
+        cloudSyncConfig.password &&
+        window.focusDesktop?.readMysqlUserState &&
+        window.focusDesktop?.writeMysqlUserState
+    );
   }
 
-  function cloudApiUrl() {
-    return cloudSyncConfig.url + "/rest/v1/" + CLOUD_SYNC_TABLE;
-  }
-
-  function cloudHeaders() {
-    return {
-      apikey: cloudSyncConfig.anonKey,
-      Authorization: "Bearer " + cloudSyncConfig.accessToken
-    };
-  }
-
-  function normalizeCloudUrl(value) {
-    return String(value || "").trim().replace(/\/+$/, "");
-  }
-
-  function normalizeEmail(value) {
-    return String(value || "").trim().toLowerCase();
-  }
-
-  function normalizeSyncId(value) {
-    return String(value || "").trim().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
-  }
-
-  function generateSyncIdValue() {
-    if (window.crypto?.randomUUID) {
-      return "focus-" + window.crypto.randomUUID();
-    }
-
-    return "focus-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+  function hasMysqlSettings() {
+    return Boolean(cloudSyncConfig.username);
   }
 
   function updateCloudSyncStatus() {
@@ -1025,13 +969,30 @@
       return;
     }
 
-    dom.cloudSyncStatusText.textContent = isCloudSyncConfigured() ? cloudSyncStatus : "Off";
+    dom.cloudSyncStatusText.textContent = isCloudSyncConfigured() || hasMysqlSettings() ? cloudSyncStatus : "Off";
+    if (dom.profileNameText) {
+      dom.profileNameText.textContent = cloudSyncConfig.username || "Log in";
+      dom.profileNameText.title = isCloudSyncConfigured() ? "Signed in as " + cloudSyncConfig.username : "Profile login";
+    }
     dom.syncCloudNowButton.disabled = !isCloudSyncConfigured();
-    dom.clearCloudSyncButton.disabled = !isCloudSyncConfigured();
+    dom.clearCloudSyncButton.disabled = !hasMysqlSettings();
   }
 
   function cloudSyncSummary() {
-    return isCloudSyncConfigured() ? " + cloud sync" : "";
+    return isCloudSyncConfigured() ? " + MySQL" : "";
+  }
+
+  function readMysqlConfigFromInputs(overrides = {}) {
+    return {
+      ...cloudSyncConfig,
+      username: normalizeMysqlUsername(dom.cloudSyncEmailInput?.value),
+      password: String(dom.cloudSyncKeyInput?.value || cloudSyncConfig.password || ""),
+      ...overrides
+    };
+  }
+
+  function normalizeMysqlUsername(value) {
+    return String(value || "").trim().replace(/\s+/g, " ").slice(0, 160);
   }
 
   async function hydrateSyncConfig() {
@@ -1173,6 +1134,7 @@
     return JSON.stringify({
       sessions: snapshot.sessions || [],
       manualDailyMinutes: snapshot.manualDailyMinutes || {},
+      manualDailyUpdatedAt: snapshot.manualDailyUpdatedAt || {},
       goals: snapshot.goals || [],
       settings: snapshot.settings || {}
     });
@@ -1230,12 +1192,24 @@
 
     merged.goals = Array.from(goals.values()).slice(-80);
     merged.manualDailyMinutes = { ...normalizeManualDailyMinutes(currentState.manualDailyMinutes) };
+    merged.manualDailyUpdatedAt = { ...normalizeManualDailyUpdatedAt(currentState.manualDailyUpdatedAt) };
 
     let updatedManualDays = 0;
+    const importedManualUpdatedAt = normalizeManualDailyUpdatedAt(importedState.manualDailyUpdatedAt);
     Object.entries(normalizeManualDailyMinutes(importedState.manualDailyMinutes)).forEach(([key, minutes]) => {
       const currentMinutes = Number(merged.manualDailyMinutes[key]) || 0;
-      if (minutes > currentMinutes) {
+      const currentUpdatedAt = Number(merged.manualDailyUpdatedAt[key]) || 0;
+      const importedUpdatedAt = Number(importedManualUpdatedAt[key]) || 0;
+
+      if ((currentUpdatedAt || importedUpdatedAt) && importedUpdatedAt <= currentUpdatedAt) {
+        return;
+      }
+
+      if (importedUpdatedAt || minutes > currentMinutes) {
         merged.manualDailyMinutes[key] = minutes;
+        if (importedUpdatedAt) {
+          merged.manualDailyUpdatedAt[key] = importedUpdatedAt;
+        }
         updatedManualDays += 1;
       }
     });
@@ -1761,6 +1735,7 @@
       sessions: normalizeSessions(parsed.sessions),
       timer: normalizeTimer(parsed.timer),
       manualDailyMinutes: normalizeManualDailyMinutes(parsed.manualDailyMinutes),
+      manualDailyUpdatedAt: normalizeManualDailyUpdatedAt(parsed.manualDailyUpdatedAt),
       goals: normalizeGoals(parsed.goals)
     };
   }
@@ -1862,6 +1837,18 @@
     return Object.fromEntries(Object.entries(value).map(([key, minutes]) => [key, clamp(Number(minutes) || 0, 0, 1440)]));
   }
 
+  function normalizeManualDailyUpdatedAt(value) {
+    if (!value || typeof value !== "object") {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(value)
+        .map(([key, updatedAt]) => [key, normalizeTimestamp(updatedAt)])
+        .filter((entry) => entry[1])
+    );
+  }
+
   function normalizeTimer(timer) {
     if (!timer || typeof timer !== "object") {
       return createIdleTimer();
@@ -1906,10 +1893,24 @@
     const hours = clamp(Number(dom.manualHoursInput.value) || 0, 0, 24);
     const minutes = clamp(Number(dom.manualMinutesInput.value) || 0, 0, 59);
     const key = getDateKey(Date.now());
-    state.manualDailyMinutes[key] = Math.round(hours * 60 + minutes);
+    setManualMinutesForDay(key, Math.round(hours * 60 + minutes));
+    persistAndRender();
+  }
+
+  function clearManualCredit() {
+    const key = getDateKey(Date.now());
+    setManualMinutesForDay(key, 0);
+    syncManualInputs(key);
+    persistAndRender();
+  }
+
+  function setManualMinutesForDay(key, minutes) {
+    state.manualDailyMinutes = normalizeManualDailyMinutes(state.manualDailyMinutes);
+    state.manualDailyUpdatedAt = normalizeManualDailyUpdatedAt(state.manualDailyUpdatedAt);
+    state.manualDailyMinutes[key] = clamp(Number(minutes) || 0, 0, 1440);
+    state.manualDailyUpdatedAt[key] = Date.now();
     dom.manualHoursInput.dataset.dateKey = key;
     dom.manualMinutesInput.dataset.dateKey = key;
-    persistAndRender();
   }
 
   function syncManualInputsIfNeeded(now) {

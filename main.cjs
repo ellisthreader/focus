@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -13,6 +14,15 @@ let dataRevision = 0;
 const DATA_FILE = "focus-data.db";
 const SYNC_CONFIG_FILE = "focus-sync-config.json";
 const SYNC_DATA_FILE = "focus-pattern-tracker-sync.json";
+const MYSQL_USERS_TABLE = "focus_users";
+const MYSQL_TABLE = "focus_user_documents";
+const DEFAULT_MYSQL_CONFIG = {
+  host: process.env.FOCUS_MYSQL_HOST || "127.0.0.1",
+  port: Number.parseInt(process.env.FOCUS_MYSQL_PORT, 10) || 3306,
+  database: process.env.FOCUS_MYSQL_DATABASE || "focus_pattern_tracker",
+  databaseUser: process.env.FOCUS_MYSQL_USER || "root",
+  databasePassword: process.env.FOCUS_MYSQL_PASSWORD || "root"
+};
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -232,6 +242,22 @@ ipcMain.handle("sync:write", async (event, state) => {
   return writeSyncData(state);
 });
 
+ipcMain.handle("mysql:createAccount", async (event, account, state) => {
+  return createMysqlAccount(account, state);
+});
+
+ipcMain.handle("mysql:login", async (event, account) => {
+  return loginMysqlUser(account);
+});
+
+ipcMain.handle("mysql:read", async (event, account) => {
+  return readMysqlUserState(account);
+});
+
+ipcMain.handle("mysql:write", async (event, account, state) => {
+  return writeMysqlUserState(account, state);
+});
+
 ipcMain.on("data:saveSync", (event, state) => {
   try {
     dataRevision += 1;
@@ -319,6 +345,225 @@ async function writeSyncData(state) {
     } catch (_) {}
     return { ok: false, enabled: true, path: syncPath, error: error.message };
   }
+}
+
+async function createMysqlAccount(account, state) {
+  const normalized = normalizeMysqlAccount(account);
+  if (!normalized.ok) return normalized;
+  let connection;
+
+  try {
+    connection = await openMysqlConnection();
+    await ensureMysqlTable(connection);
+    const existingAccount = await selectMysqlAccount(connection, normalized.account.username);
+    if (existingAccount) {
+      return { ok: false, error: "That account already exists. Log in instead." };
+    }
+
+    const credentials = hashPassword(normalized.account.password);
+    await insertMysqlAccount(connection, normalized.account.username, credentials);
+    await upsertMysqlUserState(connection, normalized.account.username, state || {});
+    return { ok: true, username: normalized.account.username, state: state || {} };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  } finally {
+    if (connection) await connection.end().catch(() => {});
+  }
+}
+
+async function loginMysqlUser(account) {
+  const normalized = normalizeMysqlAccount(account);
+  if (!normalized.ok) return normalized;
+  let connection;
+
+  try {
+    connection = await openMysqlConnection();
+    await ensureMysqlTable(connection);
+    await verifyMysqlAccount(connection, normalized.account);
+    const state = await selectMysqlUserState(connection, normalized.account.username);
+    return { ok: true, username: normalized.account.username, state };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  } finally {
+    if (connection) await connection.end().catch(() => {});
+  }
+}
+
+async function readMysqlUserState(account) {
+  const normalized = normalizeMysqlAccount(account);
+  if (!normalized.ok) return normalized;
+  let connection;
+
+  try {
+    connection = await openMysqlConnection();
+    await ensureMysqlTable(connection);
+    await verifyMysqlAccount(connection, normalized.account);
+    const state = await selectMysqlUserState(connection, normalized.account.username);
+    return { ok: true, username: normalized.account.username, state };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  } finally {
+    if (connection) await connection.end().catch(() => {});
+  }
+}
+
+async function writeMysqlUserState(account, state) {
+  const normalized = normalizeMysqlAccount(account);
+  if (!normalized.ok) return normalized;
+  let connection;
+
+  try {
+    connection = await openMysqlConnection();
+    await ensureMysqlTable(connection);
+    await verifyMysqlAccount(connection, normalized.account);
+    await upsertMysqlUserState(connection, normalized.account.username, state || {});
+    return { ok: true, username: normalized.account.username };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  } finally {
+    if (connection) await connection.end().catch(() => {});
+  }
+}
+
+async function openMysqlConnection() {
+  const mysql = require("mysql2/promise");
+  const options = {
+    host: DEFAULT_MYSQL_CONFIG.host,
+    port: DEFAULT_MYSQL_CONFIG.port,
+    user: DEFAULT_MYSQL_CONFIG.databaseUser,
+    password: DEFAULT_MYSQL_CONFIG.databasePassword,
+    database: DEFAULT_MYSQL_CONFIG.database,
+    connectTimeout: 5000,
+    charset: "utf8mb4"
+  };
+
+  try {
+    return await mysql.createConnection(options);
+  } catch (error) {
+    if (error?.code !== "ER_BAD_DB_ERROR") {
+      throw error;
+    }
+  }
+
+  const connection = await mysql.createConnection({
+    host: DEFAULT_MYSQL_CONFIG.host,
+    port: DEFAULT_MYSQL_CONFIG.port,
+    user: DEFAULT_MYSQL_CONFIG.databaseUser,
+    password: DEFAULT_MYSQL_CONFIG.databasePassword,
+    connectTimeout: 5000,
+    charset: "utf8mb4"
+  });
+  await connection.query(`CREATE DATABASE IF NOT EXISTS ${escapeIdentifier(DEFAULT_MYSQL_CONFIG.database)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  await connection.changeUser({ database: DEFAULT_MYSQL_CONFIG.database });
+  return connection;
+}
+
+async function ensureMysqlTable(connection) {
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS ${escapeIdentifier(MYSQL_USERS_TABLE)} (
+      username varchar(160) NOT NULL PRIMARY KEY,
+      password_salt varchar(64) NOT NULL,
+      password_hash varchar(128) NOT NULL,
+      created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS ${escapeIdentifier(MYSQL_TABLE)} (
+      username varchar(160) NOT NULL PRIMARY KEY,
+      payload longtext NOT NULL,
+      updated_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT ${escapeIdentifier("focus_user_documents_user_fk")}
+        FOREIGN KEY (username) REFERENCES ${escapeIdentifier(MYSQL_USERS_TABLE)} (username)
+        ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+}
+
+async function selectMysqlAccount(connection, username) {
+  const [rows] = await connection.execute(
+    `SELECT username, password_salt, password_hash FROM ${escapeIdentifier(MYSQL_USERS_TABLE)} WHERE username = ? LIMIT 1`,
+    [username]
+  );
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
+async function insertMysqlAccount(connection, username, credentials) {
+  await connection.execute(
+    `INSERT INTO ${escapeIdentifier(MYSQL_USERS_TABLE)} (username, password_salt, password_hash)
+     VALUES (?, ?, ?)`,
+    [username, credentials.salt, credentials.hash]
+  );
+}
+
+async function verifyMysqlAccount(connection, account) {
+  const stored = await selectMysqlAccount(connection, account.username);
+  if (!stored) {
+    throw new Error("Account not found. Create it first.");
+  }
+
+  const hash = hashPassword(account.password, stored.password_salt).hash;
+  const expected = Buffer.from(stored.password_hash, "hex");
+  const actual = Buffer.from(hash, "hex");
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+    throw new Error("Incorrect password.");
+  }
+}
+
+async function selectMysqlUserState(connection, profileName) {
+  const [rows] = await connection.execute(
+    `SELECT payload FROM ${escapeIdentifier(MYSQL_TABLE)} WHERE username = ? LIMIT 1`,
+    [profileName]
+  );
+  if (!Array.isArray(rows) || !rows[0]) {
+    return null;
+  }
+
+  return parseStoredState(rows[0].payload);
+}
+
+async function upsertMysqlUserState(connection, profileName, state) {
+  await connection.execute(
+    `INSERT INTO ${escapeIdentifier(MYSQL_TABLE)} (username, payload, updated_at)
+     VALUES (?, ?, CURRENT_TIMESTAMP)
+     ON DUPLICATE KEY UPDATE payload = VALUES(payload), updated_at = CURRENT_TIMESTAMP`,
+    [profileName, serializeState(state)]
+  );
+}
+
+function parseStoredState(payload) {
+  const parsed = typeof payload === "string" ? JSON.parse(payload) : payload;
+  return parsed && typeof parsed === "object" && "state" in parsed ? parsed.state : parsed;
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.pbkdf2Sync(String(password), salt, 210000, 32, "sha256").toString("hex");
+  return { salt, hash };
+}
+
+function normalizeMysqlAccount(account) {
+  const parsed = account && typeof account === "object" ? account : {};
+  const normalized = {
+    username: normalizeMysqlProfileName(parsed.username || parsed.profileName),
+    password: String(parsed.password || "")
+  };
+
+  if (!normalized.username) {
+    return { ok: false, error: "Enter a username." };
+  }
+  if (!normalized.password) {
+    return { ok: false, error: "Enter a password." };
+  }
+
+  return { ok: true, account: normalized };
+}
+
+function normalizeMysqlProfileName(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").slice(0, 160);
+}
+
+function escapeIdentifier(identifier) {
+  return "`" + String(identifier).replace(/`/g, "``") + "`";
 }
 
 function getDataPath() {

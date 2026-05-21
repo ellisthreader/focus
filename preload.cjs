@@ -15,6 +15,10 @@ contextBridge.exposeInMainWorld("focusDesktop", {
   clearSyncFolder: () => ipcRenderer.invoke("sync:clearFolder"),
   readSyncData: () => ipcRenderer.invoke("sync:read"),
   writeSyncData: (state) => ipcRenderer.invoke("sync:write", state),
+  createMysqlAccount: (account, state) => ipcRenderer.invoke("mysql:createAccount", account, state),
+  loginMysqlUser: (account) => ipcRenderer.invoke("mysql:login", account),
+  readMysqlUserState: (account) => ipcRenderer.invoke("mysql:read", account),
+  writeMysqlUserState: (account, state) => ipcRenderer.invoke("mysql:write", account, state),
   saveDataSync: (state) => ipcRenderer.sendSync("data:saveSync", state),
   platform: process.platform
 });
