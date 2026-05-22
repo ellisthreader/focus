@@ -5,6 +5,9 @@ const path = require("node:path");
 
 app.commandLine.appendSwitch("no-sandbox");
 app.commandLine.appendSwitch("ozone-platform", "x11");
+app.commandLine.appendSwitch("disable-gpu");
+app.commandLine.appendSwitch("disable-gpu-compositing");
+app.commandLine.appendSwitch("in-process-gpu");
 app.disableHardwareAcceleration();
 
 let mainWindow;
@@ -20,8 +23,8 @@ const DEFAULT_MYSQL_CONFIG = {
   host: process.env.FOCUS_MYSQL_HOST || "127.0.0.1",
   port: Number.parseInt(process.env.FOCUS_MYSQL_PORT, 10) || 3306,
   database: process.env.FOCUS_MYSQL_DATABASE || "focus_pattern_tracker",
-  databaseUser: process.env.FOCUS_MYSQL_USER || "root",
-  databasePassword: process.env.FOCUS_MYSQL_PASSWORD || "root"
+  databaseUser: process.env.FOCUS_MYSQL_USER || "focus_app",
+  databasePassword: process.env.FOCUS_MYSQL_PASSWORD ?? "FocusAppLocal-2026!"
 };
 
 function createWindow() {
@@ -353,7 +356,7 @@ async function createMysqlAccount(account, state) {
   let connection;
 
   try {
-    connection = await openMysqlConnection();
+    connection = await openMysqlConnection(normalized.mysql);
     await ensureMysqlTable(connection);
     const existingAccount = await selectMysqlAccount(connection, normalized.account.username);
     if (existingAccount) {
@@ -365,7 +368,7 @@ async function createMysqlAccount(account, state) {
     await upsertMysqlUserState(connection, normalized.account.username, state || {});
     return { ok: true, username: normalized.account.username, state: state || {} };
   } catch (error) {
-    return { ok: false, error: error.message };
+    return { ok: false, error: formatMysqlError(error, normalized.mysql) };
   } finally {
     if (connection) await connection.end().catch(() => {});
   }
@@ -377,13 +380,13 @@ async function loginMysqlUser(account) {
   let connection;
 
   try {
-    connection = await openMysqlConnection();
+    connection = await openMysqlConnection(normalized.mysql);
     await ensureMysqlTable(connection);
     await verifyMysqlAccount(connection, normalized.account);
     const state = await selectMysqlUserState(connection, normalized.account.username);
     return { ok: true, username: normalized.account.username, state };
   } catch (error) {
-    return { ok: false, error: error.message };
+    return { ok: false, error: formatMysqlError(error, normalized.mysql) };
   } finally {
     if (connection) await connection.end().catch(() => {});
   }
@@ -395,13 +398,13 @@ async function readMysqlUserState(account) {
   let connection;
 
   try {
-    connection = await openMysqlConnection();
+    connection = await openMysqlConnection(normalized.mysql);
     await ensureMysqlTable(connection);
     await verifyMysqlAccount(connection, normalized.account);
     const state = await selectMysqlUserState(connection, normalized.account.username);
     return { ok: true, username: normalized.account.username, state };
   } catch (error) {
-    return { ok: false, error: error.message };
+    return { ok: false, error: formatMysqlError(error, normalized.mysql) };
   } finally {
     if (connection) await connection.end().catch(() => {});
   }
@@ -413,26 +416,26 @@ async function writeMysqlUserState(account, state) {
   let connection;
 
   try {
-    connection = await openMysqlConnection();
+    connection = await openMysqlConnection(normalized.mysql);
     await ensureMysqlTable(connection);
     await verifyMysqlAccount(connection, normalized.account);
     await upsertMysqlUserState(connection, normalized.account.username, state || {});
     return { ok: true, username: normalized.account.username };
   } catch (error) {
-    return { ok: false, error: error.message };
+    return { ok: false, error: formatMysqlError(error, normalized.mysql) };
   } finally {
     if (connection) await connection.end().catch(() => {});
   }
 }
 
-async function openMysqlConnection() {
+async function openMysqlConnection(config = DEFAULT_MYSQL_CONFIG) {
   const mysql = require("mysql2/promise");
   const options = {
-    host: DEFAULT_MYSQL_CONFIG.host,
-    port: DEFAULT_MYSQL_CONFIG.port,
-    user: DEFAULT_MYSQL_CONFIG.databaseUser,
-    password: DEFAULT_MYSQL_CONFIG.databasePassword,
-    database: DEFAULT_MYSQL_CONFIG.database,
+    host: config.host,
+    port: config.port,
+    user: config.databaseUser,
+    password: config.databasePassword,
+    database: config.database,
     connectTimeout: 5000,
     charset: "utf8mb4"
   };
@@ -446,15 +449,15 @@ async function openMysqlConnection() {
   }
 
   const connection = await mysql.createConnection({
-    host: DEFAULT_MYSQL_CONFIG.host,
-    port: DEFAULT_MYSQL_CONFIG.port,
-    user: DEFAULT_MYSQL_CONFIG.databaseUser,
-    password: DEFAULT_MYSQL_CONFIG.databasePassword,
+    host: config.host,
+    port: config.port,
+    user: config.databaseUser,
+    password: config.databasePassword,
     connectTimeout: 5000,
     charset: "utf8mb4"
   });
-  await connection.query(`CREATE DATABASE IF NOT EXISTS ${escapeIdentifier(DEFAULT_MYSQL_CONFIG.database)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-  await connection.changeUser({ database: DEFAULT_MYSQL_CONFIG.database });
+  await connection.query(`CREATE DATABASE IF NOT EXISTS ${escapeIdentifier(config.database)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  await connection.changeUser({ database: config.database });
   return connection;
 }
 
@@ -543,6 +546,7 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
 
 function normalizeMysqlAccount(account) {
   const parsed = account && typeof account === "object" ? account : {};
+  const mysql = normalizeMysqlConfig(parsed);
   const normalized = {
     username: normalizeMysqlProfileName(parsed.username || parsed.profileName),
     password: String(parsed.password || "")
@@ -555,11 +559,42 @@ function normalizeMysqlAccount(account) {
     return { ok: false, error: "Enter a password." };
   }
 
-  return { ok: true, account: normalized };
+  return { ok: true, account: normalized, mysql };
 }
 
 function normalizeMysqlProfileName(value) {
   return String(value || "").trim().replace(/\s+/g, " ").slice(0, 160);
+}
+
+function normalizeMysqlConfig(config) {
+  const port = Number.parseInt(config.port, 10);
+  return {
+    host: normalizeMysqlConnectionText(config.host) || DEFAULT_MYSQL_CONFIG.host,
+    port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_MYSQL_CONFIG.port,
+    database: normalizeMysqlConnectionText(config.database) || DEFAULT_MYSQL_CONFIG.database,
+    databaseUser: normalizeMysqlConnectionText(config.databaseUser) || DEFAULT_MYSQL_CONFIG.databaseUser,
+    databasePassword: typeof config.databasePassword === "string" ? config.databasePassword : DEFAULT_MYSQL_CONFIG.databasePassword
+  };
+}
+
+function normalizeMysqlConnectionText(value) {
+  return String(value || "").trim();
+}
+
+function formatMysqlError(error, config = DEFAULT_MYSQL_CONFIG) {
+  if (error?.code === "ER_ACCESS_DENIED_ERROR" || error?.code === "ER_ACCESS_DENIED_NO_PASSWORD_ERROR") {
+    return "MySQL rejected the database login for \"" + config.databaseUser + "\" at " + config.host + ":" + config.port + (config.databaseUser === "focus_app" ? ". Run npm run setup:mysql once to create and grant the app database user." : ". Check the Database user and Database password fields.");
+  }
+  if (error?.code === "ECONNREFUSED") {
+    return "Could not connect to MySQL at " + config.host + ":" + config.port + ". Start MySQL or update the MySQL host and port.";
+  }
+  if (error?.code === "ENOTFOUND") {
+    return "Could not resolve MySQL host \"" + config.host + "\". Check the MySQL host field.";
+  }
+  if (error?.code === "ER_DBACCESS_DENIED_ERROR") {
+    return "MySQL user \"" + config.databaseUser + "\" cannot access database \"" + config.database + "\". Grant access or choose a database that user can use.";
+  }
+  return error?.message || "MySQL request failed.";
 }
 
 function escapeIdentifier(identifier) {

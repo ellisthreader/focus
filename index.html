@@ -39,11 +39,31 @@
                 <span>Password</span>
                 <input id="cloudSyncKeyInput" type="password" maxlength="200" autocomplete="current-password" placeholder="Account password">
               </label>
-              <input id="cloudSyncUrlInput" type="hidden">
-              <input id="mysqlPortInput" type="hidden">
-              <input id="mysqlDatabaseInput" type="hidden">
-              <input id="mysqlDatabaseUserInput" type="hidden">
-              <input id="cloudSyncCodeInput" type="hidden">
+              <details class="mysql-settings">
+                <summary>MySQL connection</summary>
+                <div class="mysql-grid">
+                  <label>
+                    <span>Host</span>
+                    <input id="cloudSyncUrlInput" type="text" autocomplete="off" placeholder="127.0.0.1">
+                  </label>
+                  <label>
+                    <span>Port</span>
+                    <input id="mysqlPortInput" type="number" min="1" max="65535" step="1" placeholder="3306">
+                  </label>
+                </div>
+                <label>
+                  <span>Database</span>
+                  <input id="mysqlDatabaseInput" type="text" autocomplete="off" placeholder="focus_pattern_tracker">
+                </label>
+                <label>
+                  <span>Database user</span>
+                  <input id="mysqlDatabaseUserInput" type="text" autocomplete="username" placeholder="focus_app">
+                </label>
+                <label>
+                  <span>Database password</span>
+                  <input id="cloudSyncCodeInput" type="password" autocomplete="current-password" placeholder="FocusAppLocal-2026!">
+                </label>
+              </details>
               <input id="cloudSyncIdInput" type="hidden">
               <div class="cloud-sync-actions">
                 <button class="secondary-action text-action" id="sendCloudCodeButton" type="button">Create account</button>

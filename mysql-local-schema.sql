@@ -2,6 +2,13 @@ create database if not exists focus_pattern_tracker
   character set utf8mb4
   collate utf8mb4_unicode_ci;
 
+create user if not exists 'focus_app'@'localhost' identified by 'FocusAppLocal-2026!';
+alter user 'focus_app'@'localhost' identified by 'FocusAppLocal-2026!';
+create user if not exists 'focus_app'@'127.0.0.1' identified by 'FocusAppLocal-2026!';
+alter user 'focus_app'@'127.0.0.1' identified by 'FocusAppLocal-2026!';
+grant all privileges on focus_pattern_tracker.* to 'focus_app'@'localhost';
+grant all privileges on focus_pattern_tracker.* to 'focus_app'@'127.0.0.1';
+
 use focus_pattern_tracker;
 
 create table if not exists focus_users (

@@ -1,6 +1,13 @@
 (function () {
   const STORAGE_KEY = "focus-pattern-tracker:v1";
   const CLOUD_SYNC_KEY = "focus-pattern-tracker:mysql-sync:v1";
+  const DEFAULT_MYSQL_CONFIG = {
+    host: "127.0.0.1",
+    port: "3306",
+    database: "focus_pattern_tracker",
+    databaseUser: "focus_app",
+    databasePassword: "FocusAppLocal-2026!"
+  };
   const RING_LENGTH = 678.58;
   const THEME_VALUES = ["light", "dark"];
   const DEFAULT_SETTINGS = {
@@ -739,7 +746,8 @@
     return {
       username: "",
       password: "",
-      signedIn: false
+      signedIn: false,
+      ...DEFAULT_MYSQL_CONFIG
     };
   }
 
@@ -758,8 +766,14 @@
 
       const parsed = JSON.parse(raw);
       return {
+        ...createEmptyCloudSyncConfig(),
         username: normalizeMysqlUsername(parsed.username || parsed.profileName || parsed.email),
+        host: normalizeMysqlConnectionValue(parsed.host) || DEFAULT_MYSQL_CONFIG.host,
+        port: normalizeMysqlPort(parsed.port),
+        database: normalizeMysqlConnectionValue(parsed.database) || DEFAULT_MYSQL_CONFIG.database,
+        databaseUser: normalizeMysqlDatabaseUser(parsed.databaseUser),
         password: "",
+        databasePassword: "",
         signedIn: false
       };
     } catch (error) {
@@ -771,6 +785,10 @@
   function persistCloudSyncConfig() {
     window.localStorage.setItem(CLOUD_SYNC_KEY, JSON.stringify({
       username: cloudSyncConfig.username || "",
+      host: cloudSyncConfig.host || DEFAULT_MYSQL_CONFIG.host,
+      port: cloudSyncConfig.port || DEFAULT_MYSQL_CONFIG.port,
+      database: cloudSyncConfig.database || DEFAULT_MYSQL_CONFIG.database,
+      databaseUser: cloudSyncConfig.databaseUser || DEFAULT_MYSQL_CONFIG.databaseUser,
       signedIn: false
     }));
   }
@@ -786,11 +804,23 @@
     if (dom.cloudSyncKeyInput && !cloudSyncConfig.signedIn) {
       dom.cloudSyncKeyInput.value = "";
     }
+    if (dom.cloudSyncUrlInput) {
+      dom.cloudSyncUrlInput.value = cloudSyncConfig.host || DEFAULT_MYSQL_CONFIG.host;
+    }
+    if (dom.mysqlPortInput) {
+      dom.mysqlPortInput.value = cloudSyncConfig.port || DEFAULT_MYSQL_CONFIG.port;
+    }
+    if (dom.mysqlDatabaseInput) {
+      dom.mysqlDatabaseInput.value = cloudSyncConfig.database || DEFAULT_MYSQL_CONFIG.database;
+    }
+    if (dom.mysqlDatabaseUserInput) {
+      dom.mysqlDatabaseUserInput.value = cloudSyncConfig.databaseUser || DEFAULT_MYSQL_CONFIG.databaseUser;
+    }
+    if (dom.cloudSyncCodeInput && !cloudSyncConfig.signedIn) {
+      dom.cloudSyncCodeInput.value = "";
+    }
     if (dom.cloudSyncIdInput) {
       dom.cloudSyncIdInput.value = "";
-    }
-    if (dom.cloudSyncCodeInput) {
-      dom.cloudSyncCodeInput.value = "";
     }
     updateCloudSyncStatus();
   }
@@ -987,12 +1017,31 @@
       ...cloudSyncConfig,
       username: normalizeMysqlUsername(dom.cloudSyncEmailInput?.value),
       password: String(dom.cloudSyncKeyInput?.value || cloudSyncConfig.password || ""),
+      host: normalizeMysqlConnectionValue(dom.cloudSyncUrlInput?.value) || DEFAULT_MYSQL_CONFIG.host,
+      port: normalizeMysqlPort(dom.mysqlPortInput?.value),
+      database: normalizeMysqlConnectionValue(dom.mysqlDatabaseInput?.value) || DEFAULT_MYSQL_CONFIG.database,
+      databaseUser: normalizeMysqlConnectionValue(dom.mysqlDatabaseUserInput?.value) || DEFAULT_MYSQL_CONFIG.databaseUser,
+      databasePassword: String(dom.cloudSyncCodeInput?.value || cloudSyncConfig.databasePassword || DEFAULT_MYSQL_CONFIG.databasePassword),
       ...overrides
     };
   }
 
   function normalizeMysqlUsername(value) {
     return String(value || "").trim().replace(/\s+/g, " ").slice(0, 160);
+  }
+
+  function normalizeMysqlConnectionValue(value) {
+    return String(value || "").trim();
+  }
+
+  function normalizeMysqlDatabaseUser(value) {
+    const user = normalizeMysqlConnectionValue(value);
+    return user && user !== "root" ? user : DEFAULT_MYSQL_CONFIG.databaseUser;
+  }
+
+  function normalizeMysqlPort(value) {
+    const port = Number.parseInt(value, 10);
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? String(port) : DEFAULT_MYSQL_CONFIG.port;
   }
 
   async function hydrateSyncConfig() {
