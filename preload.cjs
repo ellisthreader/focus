@@ -20,5 +20,7 @@ contextBridge.exposeInMainWorld("focusDesktop", {
   readMysqlUserState: (account) => ipcRenderer.invoke("mysql:read", account),
   writeMysqlUserState: (account, state) => ipcRenderer.invoke("mysql:write", account, state),
   saveDataSync: (state) => ipcRenderer.sendSync("data:saveSync", state),
+  encryptSecret: (plaintext) => ipcRenderer.invoke("safeStorage:encrypt", plaintext),
+  decryptSecret: (payload) => ipcRenderer.invoke("safeStorage:decrypt", payload),
   platform: process.platform
 });

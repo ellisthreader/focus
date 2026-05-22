@@ -108,7 +108,7 @@
     bindDom();
     bindEvents();
     await hydrateSyncConfig();
-    hydrateCloudSyncConfig();
+    await hydrateCloudSyncConfig();
     await hydrateState();
     await syncCloudData();
     await syncData();
@@ -751,45 +751,110 @@
     };
   }
 
-  function hydrateCloudSyncConfig() {
+  async function hydrateCloudSyncConfig() {
     cloudSyncConfig = loadCloudSyncConfig();
-    cloudSyncStatus = isCloudSyncConfigured() ? "MySQL ready" : "MySQL off";
+    const stored = readStoredCloudSyncConfig();
+    if (stored && stored.passwordPayload && stored.signedIn) {
+      const decrypted = await decryptStoredSecret(stored.passwordPayload);
+      if (decrypted) {
+        cloudSyncConfig = { ...cloudSyncConfig, password: decrypted, signedIn: true };
+        const result = await silentCloudLogin(cloudSyncConfig);
+        if (!result.ok) {
+          cloudSyncConfig = { ...cloudSyncConfig, password: "", signedIn: false };
+          cloudSyncStatus = "Sign in again";
+        } else if (result.state) {
+          state = normalizeState(result.state);
+          rebuildModel();
+          persist(true);
+        }
+      }
+    }
+    cloudSyncStatus = isCloudSyncConfigured() ? "MySQL ready" : cloudSyncStatus || "MySQL off";
     syncCloudInputs();
   }
 
-  function loadCloudSyncConfig() {
+  function readStoredCloudSyncConfig() {
     try {
       const raw = window.localStorage.getItem(CLOUD_SYNC_KEY);
-      if (!raw) {
-        return createEmptyCloudSyncConfig();
-      }
-
-      const parsed = JSON.parse(raw);
-      return {
-        ...createEmptyCloudSyncConfig(),
-        username: normalizeMysqlUsername(parsed.username || parsed.profileName || parsed.email),
-        host: normalizeMysqlConnectionValue(parsed.host) || DEFAULT_MYSQL_CONFIG.host,
-        port: normalizeMysqlPort(parsed.port),
-        database: normalizeMysqlConnectionValue(parsed.database) || DEFAULT_MYSQL_CONFIG.database,
-        databaseUser: normalizeMysqlDatabaseUser(parsed.databaseUser),
-        password: "",
-        databasePassword: "",
-        signedIn: false
-      };
+      return raw ? JSON.parse(raw) : null;
     } catch (error) {
-      console.warn("Unable to load MySQL sync config", error);
-      return createEmptyCloudSyncConfig();
+      console.warn("Unable to read MySQL sync config", error);
+      return null;
     }
   }
 
-  function persistCloudSyncConfig() {
+  function loadCloudSyncConfig() {
+    const parsed = readStoredCloudSyncConfig();
+    if (!parsed) {
+      return createEmptyCloudSyncConfig();
+    }
+
+    return {
+      ...createEmptyCloudSyncConfig(),
+      username: normalizeMysqlUsername(parsed.username || parsed.profileName || parsed.email),
+      host: normalizeMysqlConnectionValue(parsed.host) || DEFAULT_MYSQL_CONFIG.host,
+      port: normalizeMysqlPort(parsed.port),
+      database: normalizeMysqlConnectionValue(parsed.database) || DEFAULT_MYSQL_CONFIG.database,
+      databaseUser: normalizeMysqlDatabaseUser(parsed.databaseUser),
+      password: "",
+      databasePassword: "",
+      signedIn: false
+    };
+  }
+
+  async function decryptStoredSecret(payload) {
+    if (!payload || typeof payload.value !== "string" || !payload.value) {
+      return "";
+    }
+    if (!window.focusDesktop?.decryptSecret) {
+      return "";
+    }
+    try {
+      const result = await window.focusDesktop.decryptSecret(payload);
+      return result && result.ok ? result.value || "" : "";
+    } catch (error) {
+      console.warn("Unable to decrypt stored MySQL password", error);
+      return "";
+    }
+  }
+
+  async function silentCloudLogin(config) {
+    if (!window.focusDesktop?.loginMysqlUser) {
+      return { ok: false };
+    }
+    try {
+      const result = await window.focusDesktop.loginMysqlUser(config);
+      return result || { ok: false };
+    } catch (error) {
+      console.warn("Auto sign-in failed", error);
+      return { ok: false, error: error.message };
+    }
+  }
+
+  async function persistCloudSyncConfig() {
+    let passwordPayload = null;
+    const existing = readStoredCloudSyncConfig();
+    if (cloudSyncConfig.signedIn && cloudSyncConfig.password && window.focusDesktop?.encryptSecret) {
+      try {
+        const result = await window.focusDesktop.encryptSecret(cloudSyncConfig.password);
+        if (result && result.ok) {
+          passwordPayload = { value: result.value, encrypted: Boolean(result.encrypted) };
+        }
+      } catch (error) {
+        console.warn("Unable to encrypt MySQL password", error);
+      }
+    } else if (cloudSyncConfig.signedIn && existing && existing.passwordPayload) {
+      passwordPayload = existing.passwordPayload;
+    }
+
     window.localStorage.setItem(CLOUD_SYNC_KEY, JSON.stringify({
       username: cloudSyncConfig.username || "",
       host: cloudSyncConfig.host || DEFAULT_MYSQL_CONFIG.host,
       port: cloudSyncConfig.port || DEFAULT_MYSQL_CONFIG.port,
       database: cloudSyncConfig.database || DEFAULT_MYSQL_CONFIG.database,
       databaseUser: cloudSyncConfig.databaseUser || DEFAULT_MYSQL_CONFIG.databaseUser,
-      signedIn: false
+      signedIn: Boolean(cloudSyncConfig.signedIn && passwordPayload),
+      passwordPayload
     }));
   }
 
@@ -843,7 +908,7 @@
       }
 
       cloudSyncConfig = { ...cloudSyncConfig, signedIn: true };
-      persistCloudSyncConfig();
+      await persistCloudSyncConfig();
       cloudSyncStatus = "Account created";
       syncCloudInputs();
       render();
@@ -872,7 +937,7 @@
       }
 
       cloudSyncConfig = { ...cloudSyncConfig, signedIn: true };
-      persistCloudSyncConfig();
+      await persistCloudSyncConfig();
       if (result.state) {
         state = normalizeState(result.state);
         rebuildModel();
@@ -890,7 +955,17 @@
     }
   }
 
-  function clearCloudSyncSettings() {
+  async function clearCloudSyncSettings() {
+    if (cloudSyncConfig.signedIn && cloudSyncConfig.username && cloudSyncConfig.password) {
+      try {
+        cloudSyncStatus = "Signing out";
+        updateCloudSyncStatus();
+        await window.focusDesktop.writeMysqlUserState(cloudSyncConfig, createSyncSnapshot());
+      } catch (error) {
+        console.warn("Unable to push final state on sign out", error);
+      }
+    }
+
     cloudSyncConfig = createEmptyCloudSyncConfig();
     lastCloudSignature = "";
     cloudSyncStatus = "MySQL off";
@@ -899,6 +974,18 @@
     } catch (error) {
       console.warn("Unable to clear MySQL sync config", error);
     }
+
+    state = structuredClone(defaultState);
+    rebuildModel();
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch (error) {
+      console.warn("Unable to clear local focus state mirror", error);
+    }
+    persist(true);
+
+    hydrateControls();
+    render();
     syncCloudInputs();
   }
 

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -259,6 +259,38 @@ ipcMain.handle("mysql:read", async (event, account) => {
 
 ipcMain.handle("mysql:write", async (event, account, state) => {
   return writeMysqlUserState(account, state);
+});
+
+ipcMain.handle("safeStorage:encrypt", (event, plaintext) => {
+  const text = typeof plaintext === "string" ? plaintext : "";
+  if (!text) {
+    return { ok: true, value: "", encrypted: false };
+  }
+  try {
+    if (safeStorage && safeStorage.isEncryptionAvailable && safeStorage.isEncryptionAvailable()) {
+      const buffer = safeStorage.encryptString(text);
+      return { ok: true, value: buffer.toString("base64"), encrypted: true };
+    }
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+  return { ok: true, value: Buffer.from(text, "utf8").toString("base64"), encrypted: false };
+});
+
+ipcMain.handle("safeStorage:decrypt", (event, payload) => {
+  const value = typeof payload?.value === "string" ? payload.value : typeof payload === "string" ? payload : "";
+  if (!value) {
+    return { ok: true, value: "" };
+  }
+  try {
+    if (payload && payload.encrypted && safeStorage && safeStorage.isEncryptionAvailable && safeStorage.isEncryptionAvailable()) {
+      const buffer = Buffer.from(value, "base64");
+      return { ok: true, value: safeStorage.decryptString(buffer) };
+    }
+    return { ok: true, value: Buffer.from(value, "base64").toString("utf8") };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 });
 
 ipcMain.on("data:saveSync", (event, state) => {
