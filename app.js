@@ -6,7 +6,7 @@
     port: "3306",
     database: "focus_pattern_tracker",
     databaseUser: "focus_app",
-    databasePassword: "FocusAppLocal-2026!"
+    databasePassword: ""
   };
   const RING_LENGTH = 678.58;
   const THEME_VALUES = ["light", "dark"];

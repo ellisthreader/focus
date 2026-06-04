@@ -24,7 +24,7 @@ const DEFAULT_MYSQL_CONFIG = {
   port: Number.parseInt(process.env.FOCUS_MYSQL_PORT, 10) || 3306,
   database: process.env.FOCUS_MYSQL_DATABASE || "focus_pattern_tracker",
   databaseUser: process.env.FOCUS_MYSQL_USER || "focus_app",
-  databasePassword: process.env.FOCUS_MYSQL_PASSWORD ?? "FocusAppLocal-2026!"
+  databasePassword: process.env.FOCUS_MYSQL_PASSWORD || ""
 };
 
 function createWindow() {
@@ -615,7 +615,7 @@ function normalizeMysqlConnectionText(value) {
 
 function formatMysqlError(error, config = DEFAULT_MYSQL_CONFIG) {
   if (error?.code === "ER_ACCESS_DENIED_ERROR" || error?.code === "ER_ACCESS_DENIED_NO_PASSWORD_ERROR") {
-    return "MySQL rejected the database login for \"" + config.databaseUser + "\" at " + config.host + ":" + config.port + (config.databaseUser === "focus_app" ? ". Run npm run setup:mysql once to create and grant the app database user." : ". Check the Database user and Database password fields.");
+    return "MySQL rejected the database login for \"" + config.databaseUser + "\" at " + config.host + ":" + config.port + (config.databaseUser === "focus_app" ? ". Set FOCUS_MYSQL_PASSWORD and run npm run setup:mysql once, then enter the same database password in the app." : ". Check the Database user and Database password fields.");
   }
   if (error?.code === "ECONNREFUSED") {
     return "Could not connect to MySQL at " + config.host + ":" + config.port + ". Start MySQL or update the MySQL host and port.";

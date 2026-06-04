@@ -1,1 +1,20 @@
 node_modules/
+
+# Runtime state
+*.log
+*.tmp
+focus-data.db
+focus-sync-config.json
+focus-pattern-tracker-sync.json
+
+# Local environment and OS noise
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+out/
+coverage/
