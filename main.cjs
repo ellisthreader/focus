@@ -1,22 +1,80 @@
-const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, Notification } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
+const {
+  readCredentialConfig,
+  requestAssistantPlan,
+  transcribeAudio,
+  writeCredentialConfig
+} = require("./assistant-service.cjs");
+const {
+  DEFAULT_OLLAMA_URL,
+  checkOllamaHealth,
+  findOllamaBinary,
+  startOllamaServer
+} = require("./local-ai-runtime.cjs");
+const {
+  getLocalAssistantStatus,
+  pullLocalModel,
+  requestLocalAssistantPlan
+} = require("./local-assistant-service.cjs");
+const { createNutritionService, nutritionFailure } = require("./nutrition-service.cjs");
+const { createPerformanceMonitor } = require("./pc-performance.cjs");
+const {
+  decodeLocalState,
+  encodeLocalState,
+  getMedicalVaultCapability
+} = require("./medical-vault.cjs");
 
-app.commandLine.appendSwitch("no-sandbox");
-app.commandLine.appendSwitch("ozone-platform", "x11");
-app.commandLine.appendSwitch("disable-gpu");
-app.commandLine.appendSwitch("disable-gpu-compositing");
-app.commandLine.appendSwitch("in-process-gpu");
-app.disableHardwareAcceleration();
+if (process.env.FOCUS_COMPAT_MODE === "1") {
+  app.commandLine.appendSwitch("no-sandbox");
+  app.commandLine.appendSwitch("ozone-platform", "x11");
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("disable-gpu-compositing");
+  app.commandLine.appendSwitch("in-process-gpu");
+  app.disableHardwareAcceleration();
+}
 
 let mainWindow;
 let writeQueue = Promise.resolve();
 let dataRevision = 0;
+const nutritionService = createNutritionService();
+const performanceMonitor = createPerformanceMonitor({
+  publish(sample) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("performance:update", sample);
+    }
+  },
+  notify(alert) {
+    try {
+      if (!Notification.isSupported()) return;
+      const notification = new Notification({
+        title: alert.title,
+        body: alert.body,
+        urgency: alert.id === "temperature" ? "critical" : "normal",
+        timeoutType: "default"
+      });
+      notification.on("click", () => {
+        if (mainWindow?.isMinimized()) mainWindow.restore();
+        mainWindow?.show();
+        mainWindow?.focus();
+      });
+      notification.show();
+    } catch (error) {
+      console.warn("Unable to show PC performance notification", error);
+    }
+  }
+});
 
 const DATA_FILE = "focus-data.db";
 const SYNC_CONFIG_FILE = "focus-sync-config.json";
 const SYNC_DATA_FILE = "focus-pattern-tracker-sync.json";
+const ASSISTANT_CONFIG_FILE = "focus-ai-config.json";
+const ASSISTANT_PROVIDER_FILE = "focus-ai-provider.json";
+const DEFAULT_LOCAL_MODEL = process.env.FOCUS_LOCAL_AI_MODEL || "qwen3:4b-instruct";
+const MAX_ASSISTANT_AUDIO_BYTES = 20 * 1024 * 1024;
 const MYSQL_USERS_TABLE = "focus_users";
 const MYSQL_TABLE = "focus_user_documents";
 const DEFAULT_MYSQL_CONFIG = {
@@ -35,14 +93,31 @@ function createWindow() {
     minHeight: 720,
     backgroundColor: "#f5f7f2",
     frame: false,
-    title: "Focus Pattern Tracker",
+    title: "Focus",
     titleBarStyle: "hidden",
     show: false,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true
     }
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== mainWindow.webContents.getURL()) event.preventDefault();
+  });
+
+  mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const mediaTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
+    const isLocalApp = webContents === mainWindow?.webContents;
+    callback(
+      isLocalApp
+      && permission === "media"
+      && mediaTypes.length > 0
+      && mediaTypes.every((type) => type === "audio")
+    );
   });
 
   const showMainWindow = () => {
@@ -58,7 +133,10 @@ function createWindow() {
   setTimeout(showMainWindow, 1500);
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  performanceMonitor.start();
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
@@ -70,6 +148,10 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
+});
+
+app.on("before-quit", () => {
+  performanceMonitor.stop();
 });
 
 ipcMain.handle("window:minimize", () => {
@@ -118,8 +200,42 @@ ipcMain.handle("window:prioritize", () => {
   return true;
 });
 
+ipcMain.handle("performance:get", async () => {
+  const latest = performanceMonitor.getLatest();
+  if (latest.status === "loading") {
+    await performanceMonitor.collect();
+  }
+  return performanceMonitor.getLatest();
+});
+
+ipcMain.handle("performance:configure", (event, settings) => {
+  const normalized = performanceMonitor.configure(settings);
+  if (normalized.enabled) void performanceMonitor.collect();
+  return { ok: true, settings: normalized };
+});
+
+ipcMain.handle("nutrition:search", async (event, query) => {
+  try {
+    return { ok: true, results: await nutritionService.search(query) };
+  } catch (error) {
+    return nutritionFailure(error);
+  }
+});
+
+ipcMain.handle("nutrition:resolveMeal", async (event, description) => {
+  try {
+    return { ok: true, resolution: await nutritionService.resolveMeal(description) };
+  } catch (error) {
+    return nutritionFailure(error);
+  }
+});
+
 ipcMain.handle("data:load", () => {
   return loadData();
+});
+
+ipcMain.handle("medicalVault:getCapability", () => {
+  return getMedicalVaultCapability(safeStorage, process.platform);
 });
 
 ipcMain.handle("data:save", async (event, state) => {
@@ -128,9 +244,19 @@ ipcMain.handle("data:save", async (event, state) => {
 
   try {
     await writeQueue;
-    return { ok: true, path: getDataPath() };
+    return {
+      ok: true,
+      path: getDataPath(),
+      medicalVault: getMedicalVaultCapability(safeStorage, process.platform)
+    };
   } catch (error) {
-    return { ok: false, path: getDataPath(), error: error.message };
+    return {
+      ok: false,
+      path: getDataPath(),
+      code: error.code || "LOCAL_SAVE_FAILED",
+      error: error.message,
+      medicalVault: getMedicalVaultCapability(safeStorage, process.platform)
+    };
   }
 });
 
@@ -293,18 +419,337 @@ ipcMain.handle("safeStorage:decrypt", (event, payload) => {
   }
 });
 
+ipcMain.handle("assistant:getConfig", async () => {
+  try {
+    return await getAssistantStatus();
+  } catch (error) {
+    return assistantFailure(error);
+  }
+});
+
+ipcMain.handle("assistant:setProvider", async (event, provider) => {
+  try {
+    if (!["local", "openai"].includes(provider)) {
+      return { ok: false, code: "INVALID_PROVIDER", error: "Choose Local AI or OpenAI." };
+    }
+    const preferences = loadAssistantProviderConfig();
+    saveAssistantProviderConfig({ ...preferences, provider });
+    return await getAssistantStatus();
+  } catch (error) {
+    return assistantFailure(error);
+  }
+});
+
+ipcMain.handle("assistant:setupLocal", async () => {
+  try {
+    await ensureLocalAssistantRuntime();
+    const result = await pullLocalModel({
+      baseUrl: DEFAULT_OLLAMA_URL,
+      model: DEFAULT_LOCAL_MODEL,
+      timeoutMs: 30 * 60 * 1000
+    });
+    if (!result.installed) {
+      throw Object.assign(new Error("Ollama did not finish installing the local model."), {
+        code: "OLLAMA_PULL_FAILED"
+      });
+    }
+    const preferences = loadAssistantProviderConfig();
+    saveAssistantProviderConfig({
+      ...preferences,
+      provider: "local",
+      localModel: DEFAULT_LOCAL_MODEL
+    });
+    return await getAssistantStatus();
+  } catch (error) {
+    return assistantFailure(error);
+  }
+});
+
+ipcMain.handle("assistant:saveConfig", async (event, config) => {
+  try {
+    const result = await writeCredentialConfig({
+      filePath: getAssistantConfigPath(),
+      apiKey: config?.apiKey,
+      safeStorage
+    });
+    const preferences = loadAssistantProviderConfig();
+    saveAssistantProviderConfig({ ...preferences, provider: "openai" });
+    return { ...(await getAssistantStatus()), protected: result.protected };
+  } catch (error) {
+    return assistantFailure(error);
+  }
+});
+
+ipcMain.handle("assistant:clearConfig", async () => {
+  if (process.env.OPENAI_API_KEY?.trim()) {
+    return {
+      ok: false,
+      code: "ENVIRONMENT_CREDENTIAL",
+      error: "The OpenAI key is provided by the OPENAI_API_KEY environment variable."
+    };
+  }
+  try {
+    await fs.promises.rm(getAssistantConfigPath(), { force: true });
+    return { ok: true, configured: false, protected: false, source: "none" };
+  } catch {
+    return {
+      ok: false,
+      code: "CREDENTIAL_WRITE_FAILED",
+      error: "Could not remove the OpenAI credential."
+    };
+  }
+});
+
+ipcMain.handle("assistant:plan", async (event, request) => {
+  try {
+    const preferences = loadAssistantProviderConfig();
+    const plan = preferences.provider === "openai"
+      ? await requestAssistantPlan({
+        prompt: request?.prompt,
+        currentRequest: request?.currentRequest,
+        currentDate: request?.currentDate,
+        currentDateTime: request?.currentDateTime,
+        timeZone: request?.timeZone,
+        model: process.env.FOCUS_OPENAI_MODEL || "gpt-5.4-mini",
+        apiKey: process.env.OPENAI_API_KEY,
+        credentialFilePath: getAssistantConfigPath(),
+        safeStorage
+      })
+      : await requestLocalAssistantPlan({
+        prompt: request?.prompt,
+        currentRequest: request?.currentRequest,
+        currentDate: request?.currentDate,
+        currentDateTime: request?.currentDateTime,
+        timeZone: request?.timeZone,
+        baseUrl: DEFAULT_OLLAMA_URL,
+        model: preferences.localModel || DEFAULT_LOCAL_MODEL
+      });
+    return { ok: true, plan };
+  } catch (error) {
+    return assistantFailure(error);
+  }
+});
+
+ipcMain.handle("assistant:weeklyReview", async (event, request) => {
+  try {
+    const preferences = loadAssistantProviderConfig();
+    const state = loadData();
+    const providerKey = preferences.provider === "openai" ? "cloud" : "local";
+    const permissions = state?.settings?.privacy?.assistant?.[providerKey] || {};
+    const weeklyReviewModule = await import(pathToFileURL(
+      path.join(__dirname, "src", "core", "weekly-review.mjs")
+    ).href);
+    const snapshot = weeklyReviewModule.buildWeeklyReviewSnapshot(state, {
+      now: new Date(),
+      firstDay: Number(state?.settings?.weekStart) === 0 ? 0 : 1,
+      domains: {
+        nutrition: Boolean(permissions.nutrition),
+        exercise: Boolean(permissions.exercise),
+        finance: Boolean(permissions.finance),
+        learning: Boolean(permissions.learning)
+      }
+    });
+    const prompt = [
+      "Create a concise personal weekly review from the JSON snapshot below.",
+      "Use only the supplied calculated values. Do not recalculate, diagnose, infer causes, give financial advice, or propose application actions.",
+      "Describe notable changes, acknowledge data limitations, ask two neutral reflection questions, and suggest at most three priorities.",
+      JSON.stringify(snapshot)
+    ].join("\n");
+    const plan = preferences.provider === "openai"
+      ? await requestAssistantPlan({
+        prompt,
+        currentRequest: "Narrate this weekly review without actions.",
+        currentDate: new Date().toISOString().slice(0, 10),
+        currentDateTime: new Date().toISOString(),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        model: process.env.FOCUS_OPENAI_MODEL || "gpt-5.4-mini",
+        apiKey: process.env.OPENAI_API_KEY,
+        credentialFilePath: getAssistantConfigPath(),
+        safeStorage
+      })
+      : await requestLocalAssistantPlan({
+        prompt,
+        currentRequest: "Narrate this weekly review without actions.",
+        currentDate: new Date().toISOString().slice(0, 10),
+        currentDateTime: new Date().toISOString(),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        baseUrl: DEFAULT_OLLAMA_URL,
+        model: preferences.localModel || DEFAULT_LOCAL_MODEL
+      });
+    if (Array.isArray(plan?.actions) && plan.actions.length) {
+      throw new Error("The weekly review returned unsupported application actions.");
+    }
+    return { ok: true, review: { message: String(plan?.message || "").trim() } };
+  } catch (error) {
+    return assistantFailure(error);
+  }
+});
+
+ipcMain.handle("assistant:transcribe", async (event, request) => {
+  try {
+    if (loadAssistantProviderConfig().provider !== "openai") {
+      return {
+        ok: false,
+        code: "LOCAL_VOICE_UNAVAILABLE",
+        error: "Offline voice transcription is not installed yet. Type your request for now."
+      };
+    }
+    const audio = request?.audio;
+    const size = audio?.byteLength ?? audio?.length ?? 0;
+    if (!size || size > MAX_ASSISTANT_AUDIO_BYTES) {
+      return {
+        ok: false,
+        code: "INVALID_ARGUMENT",
+        error: `Voice recordings must be between 1 byte and ${MAX_ASSISTANT_AUDIO_BYTES / 1024 / 1024} MB.`
+      };
+    }
+    const text = await transcribeAudio({
+      audio,
+      mimeType: request?.mimeType || "audio/webm",
+      filename: request?.filename || "focus-voice.webm",
+      language: request?.language,
+      prompt: "Focus app vocabulary: eggs, toast, butter, bacon, breakfast, lunch, dinner, calories, protein, carbohydrates, fat, fiber.",
+      apiKey: process.env.OPENAI_API_KEY,
+      credentialFilePath: getAssistantConfigPath(),
+      safeStorage
+    });
+    return { ok: true, text };
+  } catch (error) {
+    return assistantFailure(error);
+  }
+});
+
 ipcMain.on("data:saveSync", (event, state) => {
   try {
     dataRevision += 1;
     saveDataSync(state);
-    event.returnValue = { ok: true, path: getDataPath() };
+    event.returnValue = {
+      ok: true,
+      path: getDataPath(),
+      medicalVault: getMedicalVaultCapability(safeStorage, process.platform)
+    };
   } catch (error) {
-    event.returnValue = { ok: false, error: error.message };
+    event.returnValue = {
+      ok: false,
+      code: error.code || "LOCAL_SAVE_FAILED",
+      error: error.message,
+      medicalVault: getMedicalVaultCapability(safeStorage, process.platform)
+    };
   }
 });
 
 function getSyncConfigPath() {
   return path.join(app.getPath("userData"), SYNC_CONFIG_FILE);
+}
+
+function getAssistantConfigPath() {
+  return path.join(app.getPath("userData"), ASSISTANT_CONFIG_FILE);
+}
+
+function getAssistantProviderPath() {
+  return path.join(app.getPath("userData"), ASSISTANT_PROVIDER_FILE);
+}
+
+function loadAssistantProviderConfig() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(getAssistantProviderPath(), "utf8"));
+    return {
+      provider: parsed?.provider === "openai" ? "openai" : "local",
+      localModel: typeof parsed?.localModel === "string" && parsed.localModel.trim()
+        ? parsed.localModel.trim()
+        : DEFAULT_LOCAL_MODEL
+    };
+  } catch {
+    return { provider: "local", localModel: DEFAULT_LOCAL_MODEL };
+  }
+}
+
+function saveAssistantProviderConfig(config) {
+  const filePath = getAssistantProviderPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify({
+    provider: config.provider === "openai" ? "openai" : "local",
+    localModel: config.localModel || DEFAULT_LOCAL_MODEL
+  }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+async function getAssistantStatus() {
+  const preferences = loadAssistantProviderConfig();
+  const [local, storedOpenAi] = await Promise.all([
+    getLocalAssistantStatus({
+      baseUrl: DEFAULT_OLLAMA_URL,
+      model: preferences.localModel
+    }),
+    readCredentialConfig({ filePath: getAssistantConfigPath() })
+  ]);
+  const environmentOpenAi = Boolean(process.env.OPENAI_API_KEY?.trim());
+  const openaiConfigured = environmentOpenAi || storedOpenAi.configured;
+  const openaiSource = environmentOpenAi
+    ? "environment"
+    : storedOpenAi.configured ? "secure-storage" : "none";
+  const usingLocal = preferences.provider === "local";
+  return {
+    ok: true,
+    provider: preferences.provider,
+    configured: usingLocal ? local.configured : openaiConfigured,
+    source: usingLocal ? "local" : openaiSource,
+    model: usingLocal
+      ? preferences.localModel
+      : process.env.FOCUS_OPENAI_MODEL || "gpt-5.4-mini",
+    runtimeAvailable: local.runtimeAvailable,
+    modelInstalled: local.modelInstalled,
+    voiceAvailable: !usingLocal && openaiConfigured,
+    local: {
+      ready: local.configured,
+      runtimeAvailable: local.runtimeAvailable,
+      modelInstalled: local.modelInstalled,
+      model: preferences.localModel,
+      version: local.version || ""
+    },
+    openai: {
+      configured: openaiConfigured,
+      protected: storedOpenAi.protected,
+      source: openaiSource,
+      model: process.env.FOCUS_OPENAI_MODEL || "gpt-5.4-mini"
+    }
+  };
+}
+
+async function waitForOllama(attempts = 30) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const health = await checkOllamaHealth({ baseUrl: DEFAULT_OLLAMA_URL });
+    if (health.healthy) return health;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw Object.assign(new Error("Ollama did not become ready. Check the local AI log in Focus app data."), {
+    code: "OLLAMA_START_FAILED"
+  });
+}
+
+async function ensureLocalAssistantRuntime() {
+  const health = await checkOllamaHealth({ baseUrl: DEFAULT_OLLAMA_URL });
+  if (health.healthy) return health;
+  const binaryPath = await findOllamaBinary();
+  if (!binaryPath) {
+    throw Object.assign(
+      new Error("Ollama is not installed. Install it in ~/.local/bin, then retry Local AI setup."),
+      { code: "OLLAMA_NOT_INSTALLED" }
+    );
+  }
+  await startOllamaServer({
+    binaryPath,
+    baseUrl: DEFAULT_OLLAMA_URL,
+    dataDir: app.getPath("userData")
+  });
+  return waitForOllama();
+}
+
+function assistantFailure(error) {
+  return {
+    ok: false,
+    code: typeof error?.code === "string" ? error.code : "ASSISTANT_ERROR",
+    error: typeof error?.message === "string" ? error.message : "The assistant request failed."
+  };
 }
 
 function getSyncDataPath(folder = loadSyncConfig().folder) {
@@ -639,46 +1084,126 @@ function getDataPath() {
 
 function loadData() {
   const dataPath = getDataPath();
+  const backupPath = `${dataPath}.bak`;
+  const medicalVault = getMedicalVaultCapability(safeStorage, process.platform);
 
   try {
     if (!fs.existsSync(dataPath)) {
-      return { ok: true, state: null, path: dataPath };
+      return { ok: true, state: null, path: dataPath, medicalVault };
     }
 
     const raw = fs.readFileSync(dataPath, "utf8");
-    const parsed = JSON.parse(raw);
+    const decoded = decodeLocalState(raw, { safeStorage, platform: process.platform });
+    if (decoded.needsMigration) {
+      saveMigratedLocalState(dataPath, decoded.state);
+    }
     return {
       ok: true,
-      state: parsed && typeof parsed === "object" && "state" in parsed ? parsed.state : parsed,
-      path: dataPath
+      state: decoded.state,
+      path: dataPath,
+      migrated: decoded.needsMigration,
+      medicalVault
     };
   } catch (error) {
-    preserveCorruptDataFile(dataPath);
-    return { ok: false, state: null, path: dataPath, error: error.message };
+    if (error.code === "LOCAL_ENVELOPE_CORRUPT") {
+      preserveCorruptDataFile(dataPath);
+    }
+    if (fs.existsSync(backupPath)) {
+      try {
+        const backup = fs.readFileSync(backupPath, "utf8");
+        const decoded = decodeLocalState(backup, { safeStorage, platform: process.platform });
+        return {
+          ok: true,
+          state: decoded.state,
+          path: dataPath,
+          recoveredFromBackup: true,
+          warning: "Focus recovered the last known-good local backup after the primary data file could not be read.",
+          medicalVault
+        };
+      } catch {
+        // Report the original load failure below.
+      }
+    }
+    return {
+      ok: false,
+      state: null,
+      path: dataPath,
+      code: error.code || "LOCAL_LOAD_FAILED",
+      error: error.message,
+      medicalVault
+    };
   }
 }
 
 async function saveData(state, revision) {
   const dataPath = getDataPath();
+  const backupPath = `${dataPath}.bak`;
   const tmpPath = `${dataPath}.${process.pid}-${revision}.tmp`;
-  const payload = serializeState(state);
+  const payload = encodeLocalState(state, { safeStorage, platform: process.platform });
 
   await fs.promises.mkdir(path.dirname(dataPath), { recursive: true });
-  await fs.promises.writeFile(tmpPath, payload, "utf8");
-  if (revision !== dataRevision) {
-    await fs.promises.rm(tmpPath, { force: true });
-    return;
+  let handle;
+  try {
+    handle = await fs.promises.open(tmpPath, "w", 0o600);
+    await handle.writeFile(payload, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    if (revision !== dataRevision) {
+      await fs.promises.rm(tmpPath, { force: true });
+      return;
+    }
+    if (fs.existsSync(dataPath)) await fs.promises.copyFile(dataPath, backupPath);
+    await fs.promises.rename(tmpPath, dataPath);
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+    throw error;
   }
-  await fs.promises.rename(tmpPath, dataPath);
 }
 
 function saveDataSync(state) {
   const dataPath = getDataPath();
+  const backupPath = `${dataPath}.bak`;
   const tmpPath = `${dataPath}.${process.pid}-sync.tmp`;
+  const payload = encodeLocalState(state, { safeStorage, platform: process.platform });
 
   fs.mkdirSync(path.dirname(dataPath), { recursive: true });
-  fs.writeFileSync(tmpPath, serializeState(state), "utf8");
-  fs.renameSync(tmpPath, dataPath);
+  let fd;
+  try {
+    fd = fs.openSync(tmpPath, "w", 0o600);
+    fs.writeFileSync(fd, payload, "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    if (fs.existsSync(dataPath)) fs.copyFileSync(dataPath, backupPath);
+    fs.renameSync(tmpPath, dataPath);
+  } catch (error) {
+    if (fd !== null && fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {}
+    }
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch (_) {}
+    throw error;
+  }
+}
+
+function saveMigratedLocalState(dataPath, state) {
+  const tmpPath = `${dataPath}.${process.pid}-migration.tmp`;
+  const payload = encodeLocalState(state, { safeStorage, platform: process.platform });
+
+  try {
+    fs.writeFileSync(tmpPath, payload, "utf8");
+    fs.renameSync(tmpPath, dataPath);
+  } catch (error) {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch (_) {}
+    throw error;
+  }
 }
 
 function serializeState(state) {

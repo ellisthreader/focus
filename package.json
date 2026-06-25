@@ -1,8 +1,10 @@
 {
-  "name": "focus-pattern-tracker",
+  "name": "focus-personal-os",
   "version": "1.0.0",
   "private": true,
-  "description": "A private desktop focus tracker with explainable local pattern learning.",
+  "author": "Ellis Threader",
+  "desktopName": "focus.desktop",
+  "description": "A private local-first personal operating system for planning, focus, health, progress, and reflection.",
   "main": "main.cjs",
   "repository": {
     "type": "git",
@@ -17,22 +19,70 @@
     "productivity",
     "time-tracking",
     "local-first",
-    "focus"
+    "focus",
+    "calendar",
+    "tasks",
+    "habits",
+    "personal-dashboard"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "start": "bash -c 'unset ELECTRON_RUN_AS_NODE; electron --no-sandbox --ozone-platform=x11 --disable-gpu --disable-gpu-compositing --in-process-gpu .'",
-    "check": "node --check main.cjs && node --check preload.cjs && node --check app.js && node --check focusModel.js",
+    "start": "bash -c 'unset ELECTRON_RUN_AS_NODE; FOCUS_COMPAT_MODE=1 electron --no-sandbox --disable-setuid-sandbox .'",
+    "start:compat": "npm start",
+    "check": "node scripts/check.cjs",
+    "verify": "npm run check && npm test",
+    "package": "electron-builder --dir",
+    "dist": "electron-builder",
     "setup:mysql": "node scripts/setup-mysql.cjs",
     "screenshots": "node scripts/capture-screenshots.cjs",
-    "test": "node --test focusModel.test.cjs"
+    "test": "node --test focusModel.test.cjs test/*.test.mjs test/*.test.cjs"
   },
   "devDependencies": {
-    "electron": "^41.7.0"
+    "electron": "^41.7.0",
+    "electron-builder": "^26.15.2"
   },
   "dependencies": {
     "mysql2": "^3.22.3"
+  },
+  "build": {
+    "appId": "com.ellisthreader.focus",
+    "productName": "Focus",
+    "asar": true,
+    "files": [
+      "index.html",
+      "main.cjs",
+      "preload.cjs",
+      "focusModel.js",
+      "assistant-service.cjs",
+      "local-assistant-service.cjs",
+      "local-ai-runtime.cjs",
+      "medical-vault.cjs",
+      "nutrition-service.cjs",
+      "pc-performance.cjs",
+      "src/**/*",
+      "package.json"
+    ],
+    "artifactName": "Focus-${version}-${os}-${arch}.${ext}",
+    "linux": {
+      "executableName": "focus",
+      "syncDesktopName": true,
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    }
   }
 }

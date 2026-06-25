@@ -8,7 +8,8 @@ const path = require("node:path");
 const root = path.resolve(__dirname, "..");
 const screenshotsDir = path.join(root, "docs", "screenshots");
 const indexUrl = pathToFileUrl(path.join(root, "index.html"));
-const storageKey = "focus-pattern-tracker:v1";
+const storageKey = "focus-pattern-tracker:v2";
+const legacyStorageKey = "focus-pattern-tracker:v1";
 const cloudKey = "focus-pattern-tracker:mysql-sync:v1";
 const chrome = findChrome();
 
@@ -24,13 +25,49 @@ const variants = [
     name: "dashboard-dark",
     width: 1440,
     height: 960,
-    state: createPortfolioState({ theme: "dark", sideTab: "settings" })
+    state: createPortfolioState({ theme: "dark", activePage: "today" })
   },
   {
     name: "goals-light",
     width: 1280,
     height: 900,
-    state: createPortfolioState({ theme: "light", sideTab: "goals" })
+    state: createPortfolioState({ theme: "light", activePage: "progress" })
+  },
+  {
+    name: "performance-light",
+    width: 1280,
+    height: 900,
+    state: createPortfolioState({ theme: "light", activePage: "performance" })
+  },
+  {
+    name: "settings-light",
+    width: 1280,
+    height: 900,
+    state: createPortfolioState({ theme: "light", activePage: "settings" })
+  },
+  {
+    name: "nutrition-light",
+    width: 1280,
+    height: 960,
+    state: createPortfolioState({ theme: "light", activePage: "health", healthView: "nutrition" })
+  },
+  {
+    name: "finance-light",
+    width: 1280,
+    height: 960,
+    state: createPortfolioState({ theme: "light", activePage: "finance" })
+  },
+  {
+    name: "learning-light",
+    width: 1280,
+    height: 960,
+    state: createPortfolioState({ theme: "light", activePage: "progress", progressView: "learning" })
+  },
+  {
+    name: "dashboard-narrow",
+    width: 760,
+    height: 900,
+    state: createPortfolioState({ theme: "light", activePage: "today" })
   }
 ];
 
@@ -82,12 +119,18 @@ function previewHtml(state) {
 <meta charset="utf-8">
 <script>
   localStorage.setItem(${JSON.stringify(storageKey)}, ${JSON.stringify(JSON.stringify(state))});
+  localStorage.removeItem(${JSON.stringify(legacyStorageKey)});
   localStorage.removeItem(${JSON.stringify(cloudKey)});
   location.replace(${JSON.stringify(indexUrl + "?portfolio-preview=1")});
 </script>`;
 }
 
-function createPortfolioState({ theme, sideTab }) {
+function createPortfolioState({
+  theme,
+  activePage = "today",
+  healthView = "checkin",
+  progressView = "habits"
+}) {
   const now = Date.now();
   const todayKey = dateKey(now);
   const sessions = [
@@ -101,12 +144,24 @@ function createPortfolioState({ theme, sideTab }) {
   ];
 
   return {
+    schemaVersion: 3,
     theme,
-    sideTab,
+    profile: { name: "Ellis" },
     settings: {
+      theme,
       dailyGoalMinutes: 360,
       blockGoalMinutes: 50,
       weeklyGoalHours: 30,
+      financeCurrency: "GBP",
+      learningTargetMinutes: 180,
+      nutritionGoals: {
+        enabled: true,
+        calories: 2200,
+        proteinGrams: 140,
+        carbsGrams: 240,
+        fatGrams: 75,
+        fiberGrams: 30
+      },
       shortBreakMinutes: 10,
       longBreakMinutes: 25,
       blocksBeforeLongBreak: 4
@@ -137,11 +192,74 @@ function createPortfolioState({ theme, sideTab }) {
     manualDailyUpdatedAt: {
       [todayKey]: now
     },
-    goals: [
-      goal("Prepare architecture walkthrough", false, now - 3 * 3600000),
-      goal("Capture final dashboard screenshots", false, now - 2 * 3600000),
-      goal("Run tests before publishing", true, now - 5 * 3600000, now - 90 * 60000)
-    ]
+    tasks: [
+      task("Prepare architecture walkthrough", false, now - 3 * 3600000, "high", todayKey),
+      task("Capture final dashboard screenshots", false, now - 2 * 3600000, "medium", todayKey),
+      task("Run tests before publishing", true, now - 5 * 3600000, "medium", todayKey, now - 90 * 60000)
+    ],
+    reminders: [
+      { id: "reminder-review", title: "Review release checklist", dueAt: new Date(now + 2 * 3600000).toISOString(), completed: false, kind: "work", createdAt: now }
+    ],
+    events: [
+      { id: "event-review", title: "Portfolio review", start: new Date(now + 75 * 60000).toISOString(), end: new Date(now + 135 * 60000).toISOString(), category: "work", location: "Desktop" }
+    ],
+    habits: [
+      { id: "habit-walk", name: "Walk outside", target: 1, unit: "times", frequency: "daily", entries: { [todayKey]: 1 }, createdAt: now - 6 * 86400000 }
+    ],
+    healthEntries: [
+      { id: "health-today", date: todayKey, sleepHours: 7.5, energy: 4, mood: 4, waterGlasses: 4, movementMinutes: 30, note: "Steady day", updatedAt: now }
+    ],
+    nutritionEntries: [
+      { id: "meal-breakfast", date: todayKey, mealType: "breakfast", name: "Greek yoghurt, oats and berries", servingAmount: 1, servingUnit: "bowl", calories: 430, proteinGrams: 28, carbsGrams: 54, fatGrams: 12, fiberGrams: 9, sourceType: "manual", confidence: "manual", createdAt: now - 5 * 3600000 },
+      { id: "meal-lunch", date: todayKey, mealType: "lunch", name: "Chicken rice bowl", servingAmount: 1, servingUnit: "meal", calories: 690, proteinGrams: 48, carbsGrams: 78, fatGrams: 19, fiberGrams: 8, sourceType: "usda", sourceLabel: "USDA FoodData Central", confidence: "verified", createdAt: now - 2 * 3600000 }
+    ],
+    workoutSessions: [
+      { id: "workout-upper", date: todayKey, name: "Upper body", type: "strength", durationMinutes: 52, effort: 4, exercises: [{ name: "Bench press", sets: 3, reps: 8, weightKg: 72.5 }], createdAt: now }
+    ],
+    trainingPlans: [
+      { id: "plan-strength", name: "Three-day strength", goal: "Build consistency", weeklyTarget: 3, active: true, createdAt: now - 5 * 86400000 }
+    ],
+    financeEntries: [
+      { id: "finance-income", date: todayKey, label: "Salary", amountMinor: 280000, kind: "income", currency: "GBP", category: "Income", createdAt: now - 4 * 86400000 },
+      { id: "finance-food", date: todayKey, label: "Groceries", amountMinor: 6240, kind: "expense", currency: "GBP", category: "Food", createdAt: now - 3600000 }
+    ],
+    financeBudgets: [
+      { id: "budget-food", category: "Food", monthlyLimitMinor: 28000, active: true, createdAt: now }
+    ],
+    financeRecurring: [
+      { id: "recurring-internet", name: "Internet", amountMinor: 3200, kind: "expense", currency: "GBP", category: "Bills", frequency: "monthly", nextDueDate: todayKey, active: true, createdAt: now }
+    ],
+    financeGoals: [
+      { id: "goal-emergency", name: "Emergency fund", kind: "saving", targetAmountMinor: 300000, currentAmountMinor: 125000, active: true, createdAt: now }
+    ],
+    learningItems: [
+      { id: "learning-spanish", title: "Conversational Spanish", kind: "skill", status: "active", progress: 14, target: 40, unit: "lessons", source: "Language course", createdAt: now }
+    ],
+    learningLogs: [
+      { id: "learning-log", date: todayKey, learningItemId: "learning-spanish", title: "Travel phrases", durationMinutes: 35, note: "Practised recall without notes.", createdAt: now }
+    ],
+    learningNotes: [
+      { id: "learning-note", learningItemId: "learning-spanish", title: "Past tense endings", body: "Regular preterite endings and two example verbs.", nextReviewDate: todayKey, reviewIntervalDays: 4, createdAt: now }
+    ],
+    workItems: [
+      { id: "work-focus", title: "Focus personal OS", project: "Focus", summary: "Integrated the new local-first dashboard and feature modules.", updatedAt: now - 30 * 60000, status: "active", tags: ["electron", "productivity"] },
+      { id: "work-docs", title: "Release documentation", project: "Focus", summary: "Documented migration and verification gates.", updatedAt: now - 2 * 3600000, status: "active", tags: ["docs"] }
+    ],
+    improvements: [
+      { id: "improvement-sleep", title: "Consistent sleep", area: "Health", target: 7, progress: 5, metric: "days", status: "active", createdAt: now - 7 * 86400000, updatedAt: now }
+    ],
+    journalEntries: [],
+    timeline: [],
+    ui: {
+      activePage,
+      selectedDate: todayKey,
+      taskFilter: "today",
+      timelineFilter: "all",
+      healthView,
+      progressView,
+      financeView: "budgets",
+      searchOpen: false
+    }
   };
 }
 
@@ -169,11 +287,14 @@ function session(baseMs, dayOffset, hour, minute, durationMinutes, activeMinutes
   };
 }
 
-function goal(text, completed, createdAt, completedAt = null) {
+function task(title, completed, createdAt, priority, dueDate, completedAt = null) {
   return {
-    id: text.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-    text,
+    id: title.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+    title,
     completed,
+    status: completed ? "completed" : "planned",
+    priority,
+    dueDate,
     createdAt,
     completedAt
   };
